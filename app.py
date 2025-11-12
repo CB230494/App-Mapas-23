@@ -396,61 +396,74 @@ with tab_map:
     left, right = st.columns([1,2])
     with left:
         zoom = st.slider("Zoom inicial", 5, 12, 7)
-        # ✅ Por defecto uso CartoDB Positron (muy estable en cloud)
-        base_choice = st.selectbox("Mapa base", list(BASEMAPS.keys()),
-                                   index=list(BASEMAPS.keys()).index("CartoDB Positron"))
+
+        # Base por defecto: CartoDB Positron (estable en cloud)
+        base_keys = list(BASEMAPS.keys())
+        default_base_idx = base_keys.index("CartoDB Positron") if "CartoDB Positron" in base_keys else 0
+        base_choice = st.selectbox("Mapa base", base_keys, index=default_base_idx)
+
         use_cluster = st.checkbox("Agrupar marcadores (Cluster)", value=True)
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
+        # CDN que funciona en Streamlit Cloud
         default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
 
-        # ✅ Coropleta ACTIVADA por defecto
+        # ✅ Coropleta activada por defecto
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
-        color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"], index=0)
+        color_metric = st.selectbox("Métrica de color", ["conteo (por área)", "impacto promedio"], index=0)
 
-        geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
-        st.caption("Si el GeoJSON no carga, el mapa igual mostrará puntos y heatmap.")
+        geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson", "json"])
+        st.caption("Si el GeoJSON no carga, el mapa igual mostrará puntos y Heatmap.")
 
-    # ---- Datos filtrados (si no hay hoja, dff = vacío) ----
-    gc = _get_gs_client_or_none()
-    ws = _open_or_create_worksheet(gc)
-    df = _read_df(ws)
+    # Datos filtrados (provienen de Parte 2)
     dff = _apply_filters(df)
 
     with right:
         # --- Mapa base ---
         m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True, tiles=None)
-        # agregamos solo la capa elegida (evita conflictos de capas por defecto)
         BASEMAPS[base_choice].add_to(m)
 
-        # --- Marcadores (si hay datos) ---
-        points = dff.dropna(subset=["lat","lon"]) if not dff.empty else pd.DataFrame(columns=["lat","lon"])
+        # --- Marcadores ---
+        points = dff.dropna(subset=["lat", "lon"]) if not dff.empty else pd.DataFrame(columns=["lat", "lon"])
         if use_cluster:
             cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
+
         for _, r in points.iterrows():
-            color = _color_for_category(r["categoria"], st.session_state.palette)
+            color = _color_for_category(r.get("categoria", ""), st.session_state.palette)
             popup_html = (
-                f"<b>{r['titulo']}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
+                f"<b>{r.get('titulo','Caso')}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
                 f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
                 f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
                 f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}"
             )
             marker = folium.CircleMarker(
-                location=(r["lat"], r["lon"]),
-                radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
-                tooltip=r.get("titulo","Caso"), popup=folium.Popup(popup_html, max_width=350)
+                location=(float(r["lat"]), float(r["lon"])),
+                radius=8,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.8,
+                tooltip=r.get("titulo", "Caso"),
+                popup=folium.Popup(popup_html, max_width=350),
             )
-            (marker.add_to(cluster) if use_cluster else marker.add_to(m))
+            # 👇 Nada "suelto" que deje objetos en pantalla
+            if use_cluster:
+                marker.add_to(cluster)
+            else:
+                marker.add_to(m)
 
         # --- Heatmap ---
         if show_heat and not points.empty:
-            heat_data = [[row["lat"], row["lon"], {"Alto":1.0,"Medio":0.6,"Bajo":0.3}.get(str(row.get("impacto")),0.5)]
-                         for _, row in points.iterrows()]
+            impact_w = {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}
+            heat_data = [
+                [float(row["lat"]), float(row["lon"]), impact_w.get(str(row.get("impacto")), 0.5)]
+                for _, row in points.iterrows()
+            ]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # --- Coropleta (GeoJSON) con reintentos y fallback silencioso ---
+        # --- Coropleta (GeoJSON) con reintentos y silenciosa si falla ---
         gj_obj = None
         if choropleth_on:
             if geojson_file is not None:
@@ -463,68 +476,78 @@ with tab_map:
                     resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
                     resp.raise_for_status()
                     return resp.json()
-                # orden de intentos
-                tries = [geojson_url]
+
+                candidates = [geojson_url]
                 if "github.com/" in geojson_url:
-                    tries.append(geojson_url.replace("github.com/","raw.githubusercontent.com/").replace("/blob/","/"))
+                    candidates.append(
+                        geojson_url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
+                    )
                     if "/blob/" in geojson_url:
                         owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
                         branch_path = geojson_url.split("/blob/")[1]
-                        tries.append(f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}")
-                for u in tries:
+                        candidates.append(f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}")
+
+                for u in candidates:
                     try:
                         gj_obj = _fetch(u)
                         break
                     except Exception:
                         continue
-                # si todo falla, no interrumpimos ni llenamos la pantalla de warnings
+                # Si todo falla, no interrumpimos: solo no pintamos coropleta.
 
         # --- Pintado por áreas (si hay GeoJSON válido) ---
         if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"]) > 0:
             props = gj_obj["features"][0].get("properties", {})
-            candidate_keys = ["name","NOM_PROV","provincia","PROVINCIA","NOM_CANT","canton","CANTON"]
+            candidate_keys = ["name", "NOM_PROV", "provincia", "PROVINCIA", "NOM_CANT", "canton", "CANTON"]
             area_key = next((k for k in candidate_keys if k in props), None)
 
             if area_key:
                 # Provincia vs Cantón
-                if area_key.lower().startswith(("nom_cant","canton")):
-                    area_df = dff.copy(); area_df["area"] = area_df["canton"].fillna("")
+                if area_key.lower().startswith(("nom_cant", "canton")):
+                    area_df = dff.copy()
+                    area_df["area"] = area_df["canton"].fillna("")
                 else:
-                    area_df = dff.copy(); area_df["area"] = area_df["provincia"].fillna("")
+                    area_df = dff.copy()
+                    area_df["area"] = area_df["provincia"].fillna("")
 
                 # Métrica
                 if color_metric.startswith("impacto"):
-                    mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
-                    map_weight = area_df.groupby("area")["impacto"].apply(lambda s: float(np.mean([mp.get(str(x),0.5) for x in s])) if len(s) else 0.0)
+                    mp = {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}
+                    map_weight = area_df.groupby("area")["impacto"].apply(
+                        lambda s: float(np.mean([mp.get(str(x), 0.5) for x in s])) if len(s) else 0.0
+                    )
                 else:
                     map_weight = area_df.groupby("area")["id"].count()
 
-                map_df = map_weight.reset_index().rename(columns={0:"valor","id":"valor"})
+                map_df = map_weight.reset_index().rename(columns={0: "valor", "id": "valor"})
                 map_df["area_norm"] = map_df["area"].str.strip().str.lower()
 
                 # Capa de referencia + tooltip
                 folium.GeoJson(
-                    gj_obj, name="Áreas (referencia)",
-                    style_function=lambda x: {"fillColor":"#eeeeee","color":"#555","weight":1,"fillOpacity":0.6},
-                    highlight_function=lambda x: {"weight":2,"color":"#222"},
-                    tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"])
+                    gj_obj,
+                    name="Áreas (referencia)",
+                    style_function=lambda x: {"fillColor": "#eeeeee", "color": "#555", "weight": 1, "fillOpacity": 0.6},
+                    highlight_function=lambda x: {"weight": 2, "color": "#222"},
+                    tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"]),
                 ).add_to(m)
 
                 # Pintado por valor (coropleta)
                 from branca.colormap import linear
+
                 if len(map_df):
                     vmin, vmax = float(map_df["valor"].min()), float(map_df["valor"].max())
-                    if vmin == vmax: vmin, vmax = (0.0, vmin or 1.0)
+                    if vmin == vmax:
+                        vmin, vmax = (0.0, vmin or 1.0)
                     cmap = linear.YlOrRd_09.scale(vmin, vmax)
 
                     def choropleth_style(feature):
-                        name_val = str(feature["properties"].get(area_key,"")).strip().lower()
+                        name_val = str(feature["properties"].get(area_key, "")).strip().lower()
                         row = map_df[map_df["area_norm"] == name_val]
                         if not row.empty:
                             val = float(row["valor"].values[0])
-                            return {"fillColor": cmap(val), "color":"#444", "weight":1, "fillOpacity":0.7}
+                            return {"fillColor": cmap(val), "color": "#444", "weight": 1, "fillOpacity": 0.7}
                         else:
-                            return {"fillColor": "#dddddd", "color":"#444", "weight":1, "fillOpacity":0.3}
+                            return {"fillColor": "#dddddd", "color": "#444", "weight": 1, "fillOpacity": 0.3}
 
                     folium.GeoJson(gj_obj, name="Coropleta (auto)", style_function=choropleth_style).add_to(m)
                     cmap.caption = "Intensidad por área"
@@ -624,6 +647,7 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
 
