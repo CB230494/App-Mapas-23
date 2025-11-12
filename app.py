@@ -339,54 +339,53 @@ with tab_charts:
 with tab_map:
     st.subheader("Mapa de Casos de Éxito – Costa Rica")
 
-    left, right = st.columns([1,2])
+    left, right = st.columns([1,2], gap="large")
     with left:
         zoom = st.slider("Zoom inicial", 5, 12, 7)
+
         base_keys = list(BASEMAPS.keys())
         default_base_idx = base_keys.index("CartoDB Positron") if "CartoDB Positron" in base_keys else 0
         base_choice = st.selectbox("Mapa base", base_keys, index=default_base_idx)
+
         use_cluster = st.checkbox("Agrupar marcadores (Cluster)", value=True)
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
         default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
+
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
         color_metric = st.selectbox("Métrica de color", ["conteo (por área)", "impacto promedio"], index=0)
+
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson", "json"])
         st.caption("Si el GeoJSON no carga, el mapa igual mostrará puntos y Heatmap.")
 
+    # Datos filtrados
     dff = _apply_filters(df)
 
     with right:
-        # --- Mapa base con fallbacks ---
-        m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True, tiles=None)
+        # --- SIEMPRE poner un fondo OSM funcional ---
+        m = folium.Map(
+            location=CR_CENTER,
+            zoom_start=zoom,
+            control_scale=True,
+            tiles="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            attr="© OpenStreetMap contributors"
+        )
 
-        def _safe_add_base(layer_name: str):
-            try:
-                BASEMAPS[layer_name].add_to(m); return layer_name
-            except Exception: pass
-            try:
-                folium.TileLayer(
-                    tiles="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-                    name="OpenStreetMap (fallback)", attr="© OpenStreetMap contributors"
-                ).add_to(m); return "OpenStreetMap (fallback)"
-            except Exception: pass
-            try:
-                folium.TileLayer(
-                    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-                    name="Esri Street (fallback)", attr="Sources: Esri, USGS, NOAA, etc."
-                ).add_to(m); return "Esri Street (fallback)"
-            except Exception:
-                return None
-
-        used_base = _safe_add_base(base_choice)
-        if not used_base: st.error("No fue posible cargar ningún mapa base.")
+        # Intentar superponer el base elegido (si no carga, nos quedamos con OSM)
+        try:
+            BASEMAPS[base_choice].add_to(m)
+            st.caption(f"Base usada: **{base_choice}**")
+        except Exception:
+            st.warning("No se pudo cargar el mapa base elegido. Usando OpenStreetMap por defecto.")
 
         # --- Marcadores ---
         points = dff.dropna(subset=["lat","lon"]) if not dff.empty else pd.DataFrame(columns=["lat","lon"])
         _palette = st.session_state.get("palette", {c: "#1f77b4" for c in DEFAULT_CATEGORIAS})
-        if use_cluster: cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
+
+        if use_cluster:
+            cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
 
         for _, r in points.iterrows():
             color = _color_for_category(r.get("categoria",""), _palette)
@@ -399,38 +398,50 @@ with tab_map:
             marker = folium.CircleMarker(
                 location=(float(r["lat"]), float(r["lon"])),
                 radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
-                tooltip=r.get("titulo","Caso"), popup=folium.Popup(popup_html, max_width=350)
+                tooltip=r.get("titulo","Caso"),
+                popup=folium.Popup(popup_html, max_width=350),
             )
-            if use_cluster: marker.add_to(cluster)
-            else: marker.add_to(m)
+            if use_cluster:
+                marker.add_to(cluster)
+            else:
+                marker.add_to(m)
 
         # --- Heatmap ---
         if show_heat and not points.empty:
             impact_w = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
-            heat_data = [[float(row["lat"]), float(row["lon"]), impact_w.get(str(row.get("impacto")),0.5)]
-                         for _, row in points.iterrows()]
+            heat_data = [
+                [float(row["lat"]), float(row["lon"]), impact_w.get(str(row.get("impacto")), 0.5)]
+                for _, row in points.iterrows()
+            ]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # --- Coropleta (GeoJSON) ---
+        # --- Coropleta (GeoJSON) con reintentos silenciosos ---
         gj_obj = None
         if choropleth_on:
             if geojson_file is not None:
-                try: gj_obj = json.load(geojson_file)
-                except Exception: st.warning("Archivo GeoJSON inválido.")
+                try:
+                    gj_obj = json.load(geojson_file)
+                except Exception:
+                    st.warning("El archivo GeoJSON subido no es válido.")
             elif geojson_url.strip():
                 def _fetch(url):
                     resp = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=25)
-                    resp.raise_for_status(); return resp.json()
+                    resp.raise_for_status()
+                    return resp.json()
                 candidates = [geojson_url]
                 if "github.com/" in geojson_url:
-                    candidates.append(geojson_url.replace("github.com/","raw.githubusercontent.com/").replace("/blob/","/"))
+                    candidates.append(
+                        geojson_url.replace("github.com/","raw.githubusercontent.com/").replace("/blob/","/")
+                    )
                     if "/blob/" in geojson_url:
                         owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
                         branch_path = geojson_url.split("/blob/")[1]
                         candidates.append(f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}")
                 for u in candidates:
-                    try: gj_obj = _fetch(u); break
-                    except Exception: continue
+                    try:
+                        gj_obj = _fetch(u); break
+                    except Exception:
+                        continue
 
         if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"])>0:
             props = gj_obj["features"][0].get("properties", {})
@@ -446,7 +457,8 @@ with tab_map:
                 if color_metric.startswith("impacto"):
                     mp = {"Alto":1.0,"Medio":0.6,"Bajo":0.3}
                     map_weight = area_df.groupby("area")["impacto"].apply(
-                        lambda s: float(np.mean([mp.get(str(x),0.5) for x in s])) if len(s) else 0.0)
+                        lambda s: float(np.mean([mp.get(str(x),0.5) for x in s])) if len(s) else 0.0
+                    )
                 else:
                     map_weight = area_df.groupby("area")["id"].count()
 
@@ -480,6 +492,7 @@ with tab_map:
 
         folium.LayerControl(collapsed=False).add_to(m)
         st_folium(m, use_container_width=True, height=650)
+
 # ================================================================
 # Parte 5: Registrar / Admin  +  Exportar
 # ================================================================
@@ -616,6 +629,7 @@ with tab_export:
             df_comb.to_excel(writer, index=False, sheet_name="casos")
         st.download_button("⬇️ Excel", data=xlsx.getvalue(), file_name="casos_exito.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
