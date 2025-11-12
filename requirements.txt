@@ -1,7 +1,15 @@
 streamlit
 pandas
-openpyxl
-python-dotenv
-supabase
+numpy
+gspread
+google-auth
+streamlit-folium
+folium
+branca
+altair
+python-dateutil
+xlsxwriter
+
+
 
 
