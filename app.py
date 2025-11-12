@@ -193,7 +193,7 @@ def _delete_row_by_id(ws, _id: str) -> bool:
 
 
 # ================================================================
-# Parte 2: Utilidades de UI, paletas, filtros y carga inicial
+# Parte 2: Utilidades de UI, paletas, filtros, carga inicial y tabs
 # ================================================================
 
 def _color_for_category(cat: str, palette: dict) -> str:
@@ -223,8 +223,8 @@ with st.sidebar:
             c, st.session_state.palette.get(c, "#1f77b4"), key=f"palette_{c}"
         )
 
-# ----- Carga de datos -----
-gc = _get_gs_client()
+# ----- Conexión y carga de datos (una sola vez) -----
+gc = _get_gs_client_or_none()          # <- nombre nuevo
 ws = _open_or_create_worksheet(gc)
 df = _read_df(ws)
 
@@ -264,6 +264,7 @@ def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
 tab_reg, tab_map, tab_charts, tab_export = st.tabs(
     ["📝 Registrar / Admin", "🗺️ Mapa", "📈 Gráficas", "⬇️ Exportar"]
 )
+
 # ================================================================
 # Parte 3: Registrar / Administrar registros (CRUD)
 # ================================================================
@@ -623,5 +624,6 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
