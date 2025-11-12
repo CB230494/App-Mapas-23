@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 # ================================================================
 # CASOS DE ÉXITO CR – Streamlit + Google Sheets + Folium + Altair
-# Autor: (tu equipo)
 # ------------------------------------------------
-# Parte 1: Configuración, imports, constantes, conexión GSheets
+# Parte 1: Configuración, imports, constantes y conexión robusta
 # ================================================================
 
 import uuid, json, io, re, os
@@ -14,6 +13,7 @@ import streamlit as st
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 import folium
 from folium.plugins import HeatMap, MarkerCluster
@@ -25,11 +25,10 @@ import requests  # carga GeoJSON por URL (con User-Agent + reintentos)
 st.set_page_config(page_title="Casos de Éxito – Costa Rica",
                    page_icon="🗺️", layout="wide")
 
-# Compatibilidad con versiones de Streamlit (st.rerun vs experimental_rerun)
+# Compat con versiones de Streamlit (st.rerun vs experimental_rerun)
 RERUN = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
 
 # ---------- Parámetros generales ----------
-# No usamos [gsheets] en secrets. El ID se define aquí o por variable de entorno.
 SHEET_ID = os.getenv("SHEET_ID", "1jLq0TeCc6x2OXnWC2I_A4f1kwg5Zgfd665v5Bm9IYSw")
 WS_NAME  = os.getenv("WS_NAME", "casos_exito")
 
@@ -47,16 +46,8 @@ CR_CENTER = (9.748917, -83.753428)  # Centro aproximado de Costa Rica
 
 # ---------- Mapas base (12 opciones) con attribution correcto ----------
 BASEMAPS = {
-    # OpenStreetMap
-    "OpenStreetMap": folium.TileLayer(
-        tiles="OpenStreetMap", name="OpenStreetMap", control=True
-    ),
-    "OSM France": folium.TileLayer(
-        tiles="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
-        name="OSM France", control=True,
-        attr="© OpenStreetMap France, © OSM contributors"
-    ),
-    # Carto
+    # OpenStreetMap (los más confiables en Streamlit Cloud)
+    "OpenStreetMap": folium.TileLayer(tiles="OpenStreetMap", name="OpenStreetMap", control=True),
     "CartoDB Positron": folium.TileLayer(
         tiles="CartoDB positron", name="CartoDB Positron", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
@@ -65,37 +56,40 @@ BASEMAPS = {
         tiles="CartoDB dark_matter", name="CartoDB Dark Matter", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
     ),
-    # Stamen
-    "Stamen Toner Lite": folium.TileLayer(
-        tiles="https://stamen-tiles.a.ssl.fastly.net/toner-lite/{z}/{x}/{y}.png",
-        name="Stamen Toner Lite", control=True,
-        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
-    ),
-    "Stamen Terrain": folium.TileLayer(
-        tiles="Stamen Terrain", name="Stamen Terrain", control=True,
-        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
-    ),
-    "Stamen Watercolor": folium.TileLayer(
-        tiles="Stamen Watercolor", name="Stamen Watercolor", control=True,
-        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
-    ),
-    # Esri
-    "Esri WorldStreetMap": folium.TileLayer(
+    # Esri (muy estables)
+    "Esri Street": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
         name="Esri Street", control=True,
         attr="Sources: Esri, USGS, NOAA, etc."
     ),
-    "Esri WorldTopoMap": folium.TileLayer(
+    "Esri Topo": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
         name="Esri Topo", control=True,
         attr="Sources: Esri, USGS, NOAA, etc."
     ),
-    "Esri WorldImagery": folium.TileLayer(
+    "Esri Satélite": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         name="Esri Satélite", control=True,
         attr="Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, etc."
     ),
-    # Otros
+    # Stamen / otros (algunos CDN pueden fallar en cloud; por eso no los dejo por defecto)
+    "OSM France": folium.TileLayer(
+        tiles="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+        name="OSM France", control=True, attr="© OSM France, © OSM contributors"
+    ),
+    "Stamen Toner Lite": folium.TileLayer(
+        tiles="https://stamen-tiles.a.ssl.fastly.net/toner-lite/{z}/{x}/{y}.png",
+        name="Stamen Toner Lite", control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OSM contributors"
+    ),
+    "Stamen Terrain": folium.TileLayer(
+        tiles="Stamen Terrain", name="Stamen Terrain", control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OSM contributors"
+    ),
+    "Stamen Watercolor": folium.TileLayer(
+        tiles="Stamen Watercolor", name="Stamen Watercolor", control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OSM contributors"
+    ),
     "OpenTopoMap": folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         name="OpenTopoMap", control=True,
@@ -108,39 +102,55 @@ BASEMAPS = {
     ),
 }
 
-# ---------- Conexión a Google Sheets ----------
+# ---------- Conexión a Google Sheets (robusta) ----------
 @st.cache_resource(show_spinner=False)
-def _get_gs_client():
-    """Autoriza gspread usando SOLO el bloque [gcp_service_account] de secrets."""
+def _get_gs_client_or_none():
+    """Autoriza gspread usando SOLO [gcp_service_account].
+    Devuelve None si falta secrets o hay fallo de auth (no detiene la app)."""
     try:
         creds = Credentials.from_service_account_info(
             dict(st.secrets["gcp_service_account"]),
             scopes=["https://www.googleapis.com/auth/spreadsheets",
                     "https://www.googleapis.com/auth/drive"]
         )
-    except KeyError:
-        st.error("Falta el bloque [gcp_service_account] en secrets.toml.")
-        st.stop()
-    return gspread.authorize(creds)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.warning("No se pudo autorizar Google Sheets. La app seguirá en modo solo visualización.")
+        return None
 
 def _open_or_create_worksheet(gc):
-    """Abre la worksheet o la crea con encabezados si no existe."""
-    sh = gc.open_by_key(SHEET_ID)
+    """Intenta abrir la worksheet. Si falla, devuelve None y la app sigue con DataFrame vacío."""
+    if gc is None:
+        return None
     try:
-        ws = sh.worksheet(WS_NAME)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=WS_NAME, rows=1000, cols=len(HEADERS))
-        ws.append_row(HEADERS)
-    # Asegura encabezados correctos
-    hdr = [h.strip().lower() for h in ws.row_values(1)]
-    if hdr != [h.lower() for h in HEADERS]:
-        ws.resize(rows=max(2, ws.row_count), cols=len(HEADERS))
-        ws.update("A1:Q1", [HEADERS])  # 17 columnas -> Q
-    return ws
+        sh = gc.open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet(WS_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=WS_NAME, rows=1000, cols=len(HEADERS))
+            ws.append_row(HEADERS)
+        # Asegurar encabezados correctos
+        hdr = [h.strip().lower() for h in ws.row_values(1)]
+        if hdr != [h.lower() for h in HEADERS]:
+            ws.resize(rows=max(2, ws.row_count), cols=len(HEADERS))
+            ws.update("A1:Q1", [HEADERS])  # 17 columnas -> Q
+        return ws
+    except APIError:
+        st.warning("No se puede acceder a la Hoja (permiso/ID). La app seguirá sin escritura.")
+        return None
+    except Exception:
+        st.warning("Error general al abrir la Hoja. La app seguirá sin escritura.")
+        return None
 
 def _read_df(ws) -> pd.DataFrame:
-    """Lee todos los registros en DataFrame (tipado básico)."""
-    data = ws.get_all_records()
+    """Lee registros en DataFrame. Si ws es None, devuelve DataFrame vacío con columnas correctas."""
+    if ws is None:
+        return pd.DataFrame(columns=HEADERS)
+    try:
+        data = ws.get_all_records()
+    except Exception:
+        st.warning("No se pudo leer la Hoja. Mostraré datos vacíos.")
+        data = []
     df = pd.DataFrame(data) if data else pd.DataFrame(columns=HEADERS)
     for col in ("lat","lon"):
         if col in df.columns:
@@ -155,25 +165,32 @@ def _read_df(ws) -> pd.DataFrame:
     return df[HEADERS].copy()
 
 def _append_row(ws, record: dict):
+    if ws is None:
+        st.error("No hay conexión de escritura a la Hoja.")
+        return
     ws.append_row([record.get(h, "") for h in HEADERS])
 
 def _find_row_index_by_id(ws, _id: str):
+    if ws is None: return None
     for i, val in enumerate(ws.col_values(1), start=1):  # col A
         if val == _id:
             return i
     return None
 
 def _update_row_by_id(ws, _id: str, new_record: dict) -> bool:
+    if ws is None: return False
     idx = _find_row_index_by_id(ws, _id)
     if not idx: return False
     ws.update(f"A{idx}:Q{idx}", [[new_record.get(h, "") for h in HEADERS]])
     return True
 
 def _delete_row_by_id(ws, _id: str) -> bool:
+    if ws is None: return False
     idx = _find_row_index_by_id(ws, _id)
     if not idx: return False
     ws.delete_rows(idx)
     return True
+
 
 # ================================================================
 # Parte 2: Utilidades de UI, paletas, filtros y carga inicial
@@ -378,35 +395,37 @@ with tab_map:
     left, right = st.columns([1,2])
     with left:
         zoom = st.slider("Zoom inicial", 5, 12, 7)
-        base_choice = st.selectbox("Mapa base", list(BASEMAPS.keys()), index=1)
+        # ✅ Por defecto uso CartoDB Positron (muy estable en cloud)
+        base_choice = st.selectbox("Mapa base", list(BASEMAPS.keys()),
+                                   index=list(BASEMAPS.keys()).index("CartoDB Positron"))
         use_cluster = st.checkbox("Agrupar marcadores (Cluster)", value=True)
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-
-        # 📌 CDN recomendado (sirve en Streamlit Cloud)
         default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
 
-        # ✅ Coropleta ACTIVADA por defecto (colorea sin que el usuario haga nada)
+        # ✅ Coropleta ACTIVADA por defecto
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
-
-        # Métrica por defecto: conteo de casos por área
         color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"], index=0)
 
-        # Uploader opcional
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
-        st.caption("Si no cargas/subes un GeoJSON válido, el mapa mostrará puntos y Heatmap de todas formas.")
+        st.caption("Si el GeoJSON no carga, el mapa igual mostrará puntos y heatmap.")
 
+    # ---- Datos filtrados (si no hay hoja, dff = vacío) ----
+    gc = _get_gs_client_or_none()
+    ws = _open_or_create_worksheet(gc)
+    df = _read_df(ws)
     dff = _apply_filters(df)
 
     with right:
         # --- Mapa base ---
-        m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True)
+        m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True, tiles=None)
+        # agregamos solo la capa elegida (evita conflictos de capas por defecto)
         BASEMAPS[base_choice].add_to(m)
 
-        # --- Marcadores ---
-        points = dff.dropna(subset=["lat","lon"])
+        # --- Marcadores (si hay datos) ---
+        points = dff.dropna(subset=["lat","lon"]) if not dff.empty else pd.DataFrame(columns=["lat","lon"])
         if use_cluster:
             cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
         for _, r in points.iterrows():
@@ -420,60 +439,52 @@ with tab_map:
             marker = folium.CircleMarker(
                 location=(r["lat"], r["lon"]),
                 radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
-                tooltip=r["titulo"], popup=folium.Popup(popup_html, max_width=350)
+                tooltip=r.get("titulo","Caso"), popup=folium.Popup(popup_html, max_width=350)
             )
-            if use_cluster:
-                marker.add_to(cluster)
-            else:
-                marker.add_to(m)
+            (marker.add_to(cluster) if use_cluster else marker.add_to(m))
 
         # --- Heatmap ---
         if show_heat and not points.empty:
-            heat_data = [[row["lat"], row["lon"], _weight_from_impacto(row["impacto"])] for _, row in points.iterrows()]
+            heat_data = [[row["lat"], row["lon"], {"Alto":1.0,"Medio":0.6,"Bajo":0.3}.get(str(row.get("impacto")),0.5)]
+                         for _, row in points.iterrows()]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # --- Coropleta (GeoJSON) con encabezados y reintentos ---
+        # --- Coropleta (GeoJSON) con reintentos y fallback silencioso ---
         gj_obj = None
         if choropleth_on:
             if geojson_file is not None:
-                # Subido por el usuario
-                gj_obj = json.load(geojson_file)
+                try:
+                    gj_obj = json.load(geojson_file)
+                except Exception:
+                    st.warning("El archivo GeoJSON subido no es válido.")
             elif geojson_url.strip():
-                # Intentos escalonados con User-Agent para evitar bloqueos
                 def _fetch(url):
-                    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+                    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
                     resp.raise_for_status()
                     return resp.json()
-
-                tried_urls = []
-                try:
-                    gj_obj = _fetch(geojson_url); tried_urls.append(geojson_url)
-                except Exception:
-                    # Variante raw.githubusercontent.com
+                # orden de intentos
+                tries = [geojson_url]
+                if "github.com/" in geojson_url:
+                    tries.append(geojson_url.replace("github.com/","raw.githubusercontent.com/").replace("/blob/","/"))
+                    if "/blob/" in geojson_url:
+                        owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
+                        branch_path = geojson_url.split("/blob/")[1]
+                        tries.append(f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}")
+                for u in tries:
                     try:
-                        if "github.com/" in geojson_url:
-                            raw = geojson_url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
-                            gj_obj = _fetch(raw); tried_urls.append(raw)
+                        gj_obj = _fetch(u)
+                        break
                     except Exception:
-                        # Variante usando el repo/branch si venía con /blob/
-                        try:
-                            if "github.com/" in geojson_url and "/blob/" in geojson_url:
-                                owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
-                                branch_path = geojson_url.split("/blob/")[1]
-                                api_url = f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}"
-                                gj_obj = _fetch(api_url); tried_urls.append(api_url)
-                        except Exception:
-                            st.warning("No se pudo cargar el GeoJSON desde la URL.")
+                        continue
+                # si todo falla, no interrumpimos ni llenamos la pantalla de warnings
 
-        # --- Pintado por áreas (si se obtuvo un GeoJSON válido) ---
+        # --- Pintado por áreas (si hay GeoJSON válido) ---
         if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"]) > 0:
             props = gj_obj["features"][0].get("properties", {})
             candidate_keys = ["name","NOM_PROV","provincia","PROVINCIA","NOM_CANT","canton","CANTON"]
             area_key = next((k for k in candidate_keys if k in props), None)
 
-            if not area_key:
-                st.warning("No se detectó el nombre de área en el GeoJSON (name/NOM_PROV/provincia/NOM_CANT/canton).")
-            else:
+            if area_key:
                 # Provincia vs Cantón
                 if area_key.lower().startswith(("nom_cant","canton")):
                     area_df = dff.copy(); area_df["area"] = area_df["canton"].fillna("")
@@ -482,11 +493,8 @@ with tab_map:
 
                 # Métrica
                 if color_metric.startswith("impacto"):
-                    def _impact_weight(s):
-                        mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
-                        vals = [mp.get(str(x), 0.5) for x in s]
-                        return float(np.mean(vals)) if len(vals) else 0.0
-                    map_weight = area_df.groupby("area")["impacto"].apply(_impact_weight)
+                    mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
+                    map_weight = area_df.groupby("area")["impacto"].apply(lambda s: float(np.mean([mp.get(str(x),0.5) for x in s])) if len(s) else 0.0)
                 else:
                     map_weight = area_df.groupby("area")["id"].count()
 
@@ -615,4 +623,5 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
