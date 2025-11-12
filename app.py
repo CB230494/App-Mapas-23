@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # ================================================================
-# Casos de Éxito – Mapa y Análisis (Streamlit + Google Sheets)
-# Funciona SOLO con [gcp_service_account] en secrets (no usa [gsheets])
-# - Compatibilidad con Streamlit nuevo/antiguo: RERUN()
-# - Basemaps con attribution (evita ValueError)
+# CASOS DE ÉXITO CR – Streamlit + Google Sheets + Folium + Altair
+# Autor: (tu equipo)
+# Estructura en 5 partes para fácil mantenimiento
+# ------------------------------------------------
+# Parte 1: Configuración, imports, constantes, conexión GSheets
 # ================================================================
 
 import uuid, json, io, re, os
@@ -19,17 +20,19 @@ import folium
 from folium.plugins import HeatMap, MarkerCluster
 from streamlit_folium import st_folium
 import altair as alt
-import requests  # para GeoJSON por URL
+import requests  # carga GeoJSON por URL (con User-Agent)
 
-# ------------------ Config básica ------------------
-st.set_page_config(page_title="Casos de Éxito CR", page_icon="🗺️", layout="wide")
+# ---------- Config básica ----------
+st.set_page_config(page_title="Casos de Éxito – Costa Rica",
+                   page_icon="🗺️", layout="wide")
 
-# ✅ Compat layer para rerun (Streamlit >=1.30 usa st.rerun)
+# Compatibilidad con versiones de Streamlit (st.rerun vs experimental_rerun)
 RERUN = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
 
-# ✅ SIN sección [gsheets]: valores configurables aquí o por variables de entorno
+# ---------- Parámetros generales ----------
+# No usamos [gsheets] en secrets. El ID se define aquí o por variable de entorno.
 SHEET_ID = os.getenv("SHEET_ID", "1jLq0TeCc6x2OXnWC2I_A4f1kwg5Zgfd665v5Bm9IYSw")
-WS_NAME = os.getenv("WS_NAME", "casos_exito")
+WS_NAME  = os.getenv("WS_NAME", "casos_exito")
 
 HEADERS = [
     "id","timestamp","titulo","descripcion","categoria","impacto",
@@ -41,147 +44,134 @@ HEADERS = [
 DEFAULT_CATEGORIAS = ["Seguridad","Comunidad","Prevención","Operativo","Gestión"]
 DEFAULT_IMPACTO    = ["Alto","Medio","Bajo"]
 DEFAULT_ESTADO     = ["Activo","Archivado"]
-
 CR_CENTER = (9.748917, -83.753428)  # Centro aproximado de Costa Rica
 
-# ✅ Basemaps con attribution para evitar ValueError
+# Basemaps con attribution (evita ValueError: Custom tiles must have an attribution)
 BASEMAPS = {
     "OpenStreetMap": folium.TileLayer(tiles="OpenStreetMap", control=True, name="OpenStreetMap"),
     "CartoDB Positron": folium.TileLayer(
-        tiles="CartoDB positron",
-        name="CartoDB Positron",
-        control=True,
+        tiles="CartoDB positron", name="CartoDB Positron", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
     ),
     "CartoDB Dark Matter": folium.TileLayer(
-        tiles="CartoDB dark_matter",
-        name="CartoDB Dark Matter",
-        control=True,
+        tiles="CartoDB dark_matter", name="CartoDB Dark Matter", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
     ),
     "Stamen Terrain": folium.TileLayer(
-        tiles="Stamen Terrain",
-        name="Stamen Terrain",
-        control=True,
+        tiles="Stamen Terrain", name="Stamen Terrain", control=True,
         attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
     ),
     "Esri WorldImagery": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
-        name="ESRI Satélite",
-        control=True
+        name="ESRI Satélite", control=True,
+        attr=("Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, "
+              "IGN, IGP, UPR-EGP, and the GIS User Community")
     ),
 }
 
-# ------------------ Conexión Google Sheets ------------------
+# ---------- Conexión a Google Sheets ----------
 @st.cache_resource(show_spinner=False)
 def _get_gs_client():
-    # Usa SOLO el bloque [gcp_service_account]
+    """Autoriza gspread usando SOLO el bloque [gcp_service_account] de secrets."""
     try:
         creds = Credentials.from_service_account_info(
             dict(st.secrets["gcp_service_account"]),
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
+            scopes=["https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive"]
         )
     except KeyError:
-        st.error("Falta el bloque [gcp_service_account] en secrets.")
+        st.error("Falta el bloque [gcp_service_account] en secrets.toml.")
         st.stop()
     return gspread.authorize(creds)
 
 def _open_or_create_worksheet(gc):
+    """Abre la worksheet o la crea con encabezados si no existe."""
     sh = gc.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet(WS_NAME)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=WS_NAME, rows=1000, cols=len(HEADERS))
         ws.append_row(HEADERS)
-    # Asegurar encabezados correctos
-    headers_now = [h.strip().lower() for h in ws.row_values(1)]
-    if headers_now != [h.lower() for h in HEADERS]:
+    # Asegura encabezados correctos
+    hdr = [h.strip().lower() for h in ws.row_values(1)]
+    if hdr != [h.lower() for h in HEADERS]:
         ws.resize(rows=max(2, ws.row_count), cols=len(HEADERS))
         ws.update("A1:Q1", [HEADERS])  # 17 columnas -> Q
     return ws
 
 def _read_df(ws) -> pd.DataFrame:
+    """Lee todos los registros en DataFrame (tipado básico)."""
     data = ws.get_all_records()
-    df = pd.DataFrame(data)
-    if df.empty:
-        df = pd.DataFrame(columns=HEADERS)
-    # Tipos
-    for c in ["lat","lon"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=HEADERS)
+    for col in ("lat","lon"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     if "fecha_evento" in df.columns:
         df["fecha_evento"] = pd.to_datetime(df["fecha_evento"], errors="coerce").dt.date
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    # Completar columnas faltantes y ordenar
     for h in HEADERS:
         if h not in df.columns:
             df[h] = np.nan
     return df[HEADERS].copy()
 
 def _append_row(ws, record: dict):
-    row = [record.get(h, "") for h in HEADERS]
-    ws.append_row(row)
+    ws.append_row([record.get(h, "") for h in HEADERS])
 
 def _find_row_index_by_id(ws, _id: str):
-    col = ws.col_values(1)  # Columna A == id
-    for i, val in enumerate(col, start=1):
+    for i, val in enumerate(ws.col_values(1), start=1):  # col A
         if val == _id:
             return i
     return None
 
-def _update_row_by_id(ws, _id: str, new_record: dict):
+def _update_row_by_id(ws, _id: str, new_record: dict) -> bool:
     idx = _find_row_index_by_id(ws, _id)
-    if not idx:
-        return False
+    if not idx: return False
     ws.update(f"A{idx}:Q{idx}", [[new_record.get(h, "") for h in HEADERS]])
     return True
 
-def _delete_row_by_id(ws, _id: str):
+def _delete_row_by_id(ws, _id: str) -> bool:
     idx = _find_row_index_by_id(ws, _id)
-    if not idx:
-        return False
+    if not idx: return False
     ws.delete_rows(idx)
     return True
+# ================================================================
+# Parte 2: Utilidades de UI, paletas, filtros y carga inicial
+# ================================================================
 
-# ------------------ Utilidades ------------------
-def _color_for_category(cat: str, palette: dict):
+def _color_for_category(cat: str, palette: dict) -> str:
+    """Color estable por categoría con override desde paleta del sidebar."""
     if cat in palette and palette[cat]:
         return palette[cat]
-    h = abs(hash(cat)) % 360
+    h = abs(hash(str(cat))) % 360
     return f"hsl({h},70%,45%)"
 
-def _weight_from_impacto(imp: str):
+def _weight_from_impacto(imp: str) -> float:
     return {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}.get(str(imp), 0.5)
 
 def _month_floor(d: date):
-    if pd.isna(d):
-        return None
+    if pd.isna(d): return None
     return date(d.year, d.month, 1)
 
-# ------------------ Sidebar (config + filtros) ------------------
+# ----- Sidebar: configuración y paleta -----
 with st.sidebar:
     st.header("⚙️ Configuración")
     st.caption("Fuente: Google Sheets")
-    st.write(f"Hoja: `{WS_NAME}`")
-
-    # Paleta por categoría
-    st.subheader("🎨 Paleta de categorías")
+    st.write(f"Worksheet: `{WS_NAME}`")
+    st.subheader("🎨 Paleta por categoría")
     if "palette" not in st.session_state:
         st.session_state.palette = {c: "#1f77b4" for c in DEFAULT_CATEGORIAS}
     for c in DEFAULT_CATEGORIAS:
-        st.session_state.palette[c] = st.color_picker(c, st.session_state.palette.get(c, "#1f77b4"), key=f"palette_{c}")
+        st.session_state.palette[c] = st.color_picker(
+            c, st.session_state.palette.get(c, "#1f77b4"), key=f"palette_{c}"
+        )
 
-# ------------------ Carga de datos ------------------
+# ----- Carga de datos -----
 gc = _get_gs_client()
 ws = _open_or_create_worksheet(gc)
 df = _read_df(ws)
 
-# ------------------ Filtros globales ------------------
+# ----- Filtros globales -----
 st.sidebar.subheader("🔎 Filtros")
 min_date = date(2020, 1, 1)
 max_date = date.today()
@@ -190,18 +180,18 @@ if not df["fecha_evento"].dropna().empty:
     max_date = max(max_date, df["fecha_evento"].dropna().max())
 
 rango_fecha = st.sidebar.date_input("Rango de fechas", (min_date, max_date))
-f_prov   = st.sidebar.multiselect("Provincia", sorted([x for x in df["provincia"].dropna().unique()]))
-f_canton = st.sidebar.multiselect("Cantón", sorted([x for x in df["canton"].dropna().unique()]))
-f_cat    = st.sidebar.multiselect("Categoría", sorted([x for x in df["categoria"].dropna().unique()] or DEFAULT_CATEGORIAS))
+f_prov   = st.sidebar.multiselect("Provincia", sorted(df["provincia"].dropna().unique()))
+f_canton = st.sidebar.multiselect("Cantón", sorted(df["canton"].dropna().unique()))
+f_cat    = st.sidebar.multiselect("Categoría", sorted(df["categoria"].dropna().unique() or DEFAULT_CATEGORIAS))
 f_imp    = st.sidebar.multiselect("Impacto", DEFAULT_IMPACTO)
-f_estado = st.sidebar.multiselect("Estado", DEFAULT_ESTADO or ["Activo"])
-texto    = st.sidebar.text_input("Buscar texto (título/descr./etiquetas)")
+f_estado = st.sidebar.multiselect("Estado",  DEFAULT_ESTADO or ["Activo"])
+texto    = st.sidebar.text_input("Buscar (título/descr./etiquetas)")
 
 def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
     dff = df0.copy()
-    if isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
+    if isinstance(rango_fecha, tuple) and len(rango_fecha)==2:
         ini, fin = rango_fecha
-        dff = dff[(dff["fecha_evento"].isna()) | ((dff["fecha_evento"] >= ini) & (dff["fecha_evento"] <= fin))]
+        dff = dff[(dff["fecha_evento"].isna()) | ((dff["fecha_evento"]>=ini) & (dff["fecha_evento"]<=fin))]
     if f_prov:   dff = dff[dff["provincia"].isin(f_prov)]
     if f_canton: dff = dff[dff["canton"].isin(f_canton)]
     if f_cat:    dff = dff[dff["categoria"].isin(f_cat)]
@@ -213,10 +203,14 @@ def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
         dff = dff[dff[cols].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
     return dff
 
-# ------------------ Tabs ------------------
-tab_reg, tab_map, tab_charts, tab_export = st.tabs(["📝 Registrar / Admin", "🗺️ Mapa", "📈 Gráficas", "⬇️ Exportar"])
+# ----- Pestañas -----
+tab_reg, tab_map, tab_charts, tab_export = st.tabs(
+    ["📝 Registrar / Admin", "🗺️ Mapa", "📈 Gráficas", "⬇️ Exportar"]
+)
+# ================================================================
+# Parte 3: Registrar / Administrar registros (CRUD)
+# ================================================================
 
-# ------------------ Tab: Registrar / Admin ------------------
 with tab_reg:
     st.subheader("Registrar nuevo caso de éxito")
 
@@ -233,14 +227,15 @@ with tab_reg:
         canton = st.text_input("Cantón")
     with cols[2]:
         distrito = st.text_input("Distrito")
-        etiquetas = st.text_input("Etiquetas (separadas por coma)")
-        evidencia_url = st.text_input("URL de evidencia (foto/video/documento)")
+        etiquetas = st.text_input("Etiquetas (coma/;)")
+        evidencia_url = st.text_input("URL de evidencia (foto/video/doc)")
         estado = st.selectbox("Estado", DEFAULT_ESTADO, index=0)
     with cols[3]:
         st.markdown("**Ubicación (click en el mapa o escriba coord.)**")
         lat = st.number_input("Latitud", value=float(CR_CENTER[0]), format="%.6f")
         lon = st.number_input("Longitud", value=float(CR_CENTER[1]), format="%.6f")
 
+    # Mini mapa para capturar coordenadas
     st.markdown("Haga click en el mapa para tomar coordenadas:")
     m_form = folium.Map(location=CR_CENTER, zoom_start=7)
     folium.Marker(CR_CENTER, tooltip="Centro CR").add_to(m_form)
@@ -282,9 +277,10 @@ with tab_reg:
 
     st.divider()
     st.subheader("Administrar registros")
+
     dff = _apply_filters(df)
     if dff.empty:
-        st.info("No hay registros que cumplan los filtros.")
+        st.info("No hay registros que cumplan los filtros actuales.")
     else:
         st.dataframe(dff, height=280, use_container_width=True)
 
@@ -294,33 +290,31 @@ with tab_reg:
             rec = dff[dff["id"]==selected_id].iloc[0].to_dict()
             et1, et2 = st.columns([1,1])
             with et1:
-                new_titulo = st.text_input("Título", rec.get("titulo",""))
                 cats = sorted(set(DEFAULT_CATEGORIAS + list(df["categoria"].dropna().unique())))
-                cat_idx = cats.index(rec.get("categoria")) if rec.get("categoria") in cats else 0
-                new_categoria = st.selectbox("Categoría", cats, index=cat_idx)
-                imp_idx = DEFAULT_IMPACTO.index(rec.get("impacto")) if rec.get("impacto") in DEFAULT_IMPACTO else 1
-                new_impacto = st.selectbox("Impacto", DEFAULT_IMPACTO, index=imp_idx)
+                new_titulo = st.text_input("Título", rec.get("titulo",""))
+                new_categoria = st.selectbox("Categoría", cats, index=(cats.index(rec.get("categoria")) if rec.get("categoria") in cats else 0))
+                new_impacto = st.selectbox("Impacto", DEFAULT_IMPACTO, index=(DEFAULT_IMPACTO.index(rec.get("impacto")) if rec.get("impacto") in DEFAULT_IMPACTO else 1))
                 new_fecha = st.date_input("Fecha", rec.get("fecha_evento") or date.today())
             with et2:
-                est_idx = DEFAULT_ESTADO.index(rec.get("estado")) if rec.get("estado") in DEFAULT_ESTADO else 0
-                new_estado = st.selectbox("Estado", DEFAULT_ESTADO, index=est_idx)
+                new_estado = st.selectbox("Estado", DEFAULT_ESTADO, index=(DEFAULT_ESTADO.index(rec.get("estado")) if rec.get("estado") in DEFAULT_ESTADO else 0))
                 new_lat = st.number_input("Lat", value=float(rec["lat"]) if not pd.isna(rec["lat"]) else CR_CENTER[0], format="%.6f")
                 new_lon = st.number_input("Lon", value=float(rec["lon"]) if not pd.isna(rec["lon"]) else CR_CENTER[1], format="%.6f")
 
             new_desc = st.text_area("Descripción", rec.get("descripcion",""), height=120)
+
             ecols = st.columns(3)
             with ecols[0]:
                 if st.button("💾 Guardar cambios", use_container_width=True):
-                    rec["titulo"] = new_titulo
-                    rec["categoria"] = new_categoria
-                    rec["impacto"] = new_impacto
-                    rec["fecha_evento"] = new_fecha.isoformat()
-                    rec["estado"] = new_estado
-                    rec["lat"] = new_lat
-                    rec["lon"] = new_lon
-                    rec["descripcion"] = new_desc
-                    ok = _update_row_by_id(ws, rec["id"], rec)
-                    if ok:
+                    rec.update({
+                        "titulo": new_titulo,
+                        "categoria": new_categoria,
+                        "impacto": new_impacto,
+                        "fecha_evento": new_fecha.isoformat(),
+                        "estado": new_estado,
+                        "lat": new_lat, "lon": new_lon,
+                        "descripcion": new_desc
+                    })
+                    if _update_row_by_id(ws, rec["id"], rec):
                         st.success("Actualizado ✅")
                         if RERUN: RERUN()
                     else:
@@ -334,8 +328,10 @@ with tab_reg:
                         st.error("No se pudo eliminar.")
             with ecols[2]:
                 st.caption("Edite lo necesario y luego guarde.")
+# ================================================================
+# Parte 4: Mapa Folium – cluster, heatmap y coropleta (GeoJSON)
+# ================================================================
 
-# ------------------ Tab: Mapa ------------------
 with tab_map:
     st.subheader("Mapa de Casos de Éxito – Costa Rica")
 
@@ -347,53 +343,57 @@ with tab_map:
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-        # Pre-cargado sugerido: provincias CR
-        default_geojson = "https://raw.githubusercontent.com/juanmamoralesp/cr-geojson/main/provincias.geojson"
+        # URL sugerida con CDN que permite peticiones desde Streamlit Cloud
+        default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
         color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"])
-        st.caption("Si no cargas un GeoJSON válido, la coropleta no se mostrará.")
+        st.caption("Si no cargas/subes un GeoJSON válido, la coropleta no se mostrará.")
 
     dff = _apply_filters(df)
     with right:
         m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True)
         BASEMAPS[base_choice].add_to(m)
 
-        # Marcadores
+        # ---- Marcadores ----
         points = dff.dropna(subset=["lat","lon"])
         if use_cluster:
             cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
         for _, r in points.iterrows():
             color = _color_for_category(r["categoria"], st.session_state.palette)
             popup = folium.Popup(
-                html=f"<b>{r['titulo']}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
-                     f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
-                     f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
-                     f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}",
+                html=(
+                    f"<b>{r['titulo']}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
+                    f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
+                    f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
+                    f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}"
+                ),
                 max_width=350
             )
             marker = folium.CircleMarker(
                 location=(r["lat"], r["lon"]),
-                radius=8,
-                color=color, fill=True, fill_color=color, fill_opacity=0.8,
+                radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
                 tooltip=r["titulo"]
             )
             marker.add_child(popup)
             (marker.add_to(cluster) if use_cluster else marker.add_to(m))
 
-        # Heatmap
+        # ---- Heatmap ----
         if show_heat and not points.empty:
             heat_data = [[row["lat"], row["lon"], _weight_from_impacto(row["impacto"])] for _, row in points.iterrows()]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # Coropleta (si hay GeoJSON)
+        # ---- Coropleta (GeoJSON) ----
         gj_obj = None
         if geojson_file is not None:
             gj_obj = json.load(geojson_file)
         elif geojson_url.strip():
             try:
-                gj_obj = requests.get(geojson_url, timeout=10).json()
+                # ⚠️ Importante: encabezado User-Agent para evitar bloqueos (GitHub/CF)
+                resp = requests.get(geojson_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                resp.raise_for_status()
+                gj_obj = resp.json()
             except Exception:
                 st.warning("No se pudo cargar el GeoJSON desde la URL.")
 
@@ -403,17 +403,15 @@ with tab_map:
             area_key = next((k for k in candidate_keys if k in props), None)
 
             if not area_key:
-                st.warning("No se detectó el nombre de área en el GeoJSON (probadas: name, NOM_PROV, provincia, PROVINCIA, NOM_CANT, canton, CANTON).")
+                st.warning("No se detectó el nombre de área en el GeoJSON (name/NOM_PROV/provincia/NOM_CANT/canton).")
             else:
-                # Decidir si colorear por cantón o provincia
+                # Provincia vs Cantón
                 if area_key.lower().startswith(("nom_cant","canton")):
-                    area_df = dff.copy()
-                    area_df["area"] = area_df["canton"].fillna("")
+                    area_df = dff.copy(); area_df["area"] = area_df["canton"].fillna("")
                 else:
-                    area_df = dff.copy()
-                    area_df["area"] = area_df["provincia"].fillna("")
+                    area_df = dff.copy(); area_df["area"] = area_df["provincia"].fillna("")
 
-                # Métrica
+                # Métrica de color
                 if color_metric.startswith("impacto"):
                     def _impact_weight(s):
                         mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
@@ -427,21 +425,18 @@ with tab_map:
                 map_df["area_norm"] = map_df["area"].str.strip().str.lower()
 
                 # Capa base + tooltip
-                style_function = lambda x: {"fillColor": "#eeeeee", "color":"#555", "weight":1, "fillOpacity":0.6}
                 folium.GeoJson(
-                    gj_obj,
-                    name="Áreas",
-                    style_function=style_function,
-                    highlight_function=lambda x: {"weight":2, "color":"#222"},
+                    gj_obj, name="Áreas",
+                    style_function=lambda x: {"fillColor":"#eeeeee","color":"#555","weight":1,"fillOpacity":0.6},
+                    highlight_function=lambda x: {"weight":2,"color":"#222"},
                     tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"])
                 ).add_to(m)
 
-                # Pintar por valor
+                # Pintado por valor
                 from branca.colormap import linear
                 if len(map_df):
                     vmin, vmax = float(map_df["valor"].min()), float(map_df["valor"].max())
-                    if vmin == vmax:
-                        vmin, vmax = (0.0, vmin or 1.0)
+                    if vmin == vmax: vmin, vmax = (0.0, vmin or 1.0)
                     cmap = linear.YlOrRd_09.scale(vmin, vmax)
 
                     def choropleth_style(feature):
@@ -459,8 +454,10 @@ with tab_map:
 
         folium.LayerControl(collapsed=False).add_to(m)
         st_folium(m, use_container_width=True, height=650)
+# ================================================================
+# Parte 5: Gráficas (Altair) y Exportar (CSV/Excel)
+# ================================================================
 
-# ------------------ Tab: Gráficas ------------------
 with tab_charts:
     st.subheader("Análisis y Gráficas")
     dff = _apply_filters(df)
@@ -471,7 +468,10 @@ with tab_charts:
 
         colA, colB, colC = st.columns([1,1,1])
         with colA:
-            tipo = st.selectbox("Tipo de gráfico", ["Barras por categoría","Barras por provincia","Serie mensual","Top N cantones","Torta por categoría"])
+            tipo = st.selectbox("Tipo de gráfico", [
+                "Barras por categoría","Barras por provincia","Serie mensual",
+                "Top N cantones","Torta por categoría"
+            ])
         with colB:
             n_top = st.number_input("Top N (si aplica)", min_value=3, max_value=30, value=10, step=1)
         with colC:
@@ -525,7 +525,6 @@ with tab_charts:
 
         st.altair_chart(chart, use_container_width=True)
 
-# ------------------ Tab: Exportar ------------------
 with tab_export:
     st.subheader("Exportar datos")
     dff = _apply_filters(df)
@@ -534,19 +533,15 @@ with tab_export:
     c1, c2 = st.columns(2)
     with c1:
         csv = dff.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Descargar CSV", data=csv, file_name="casos_exito.csv", mime="text/csv", use_container_width=True)
+        st.download_button("⬇️ Descargar CSV", data=csv, file_name="casos_exito.csv",
+                           mime="text/csv", use_container_width=True)
     with c2:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             dff.to_excel(writer, index=False, sheet_name="casos")
-        st.download_button(
-            "⬇️ Descargar Excel",
-            data=output.getvalue(),
-            file_name="casos_exito.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        st.download_button("⬇️ Descargar Excel", data=output.getvalue(),
+                           file_name="casos_exito.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
-
-
