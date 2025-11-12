@@ -397,7 +397,7 @@ with tab_map:
     with left:
         zoom = st.slider("Zoom inicial", 5, 12, 7)
 
-        # Base por defecto: CartoDB Positron (estable en cloud)
+        # Base por defecto: CartoDB Positron
         base_keys = list(BASEMAPS.keys())
         default_base_idx = base_keys.index("CartoDB Positron") if "CartoDB Positron" in base_keys else 0
         base_choice = st.selectbox("Mapa base", base_keys, index=default_base_idx)
@@ -406,11 +406,10 @@ with tab_map:
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-        # CDN que funciona en Streamlit Cloud
         default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
 
-        # ✅ Coropleta activada por defecto
+        # Coropleta activada por defecto
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
         color_metric = st.selectbox("Métrica de color", ["conteo (por área)", "impacto promedio"], index=0)
 
@@ -421,9 +420,42 @@ with tab_map:
     dff = _apply_filters(df)
 
     with right:
-        # --- Mapa base ---
+        # --- Mapa base con *fallbacks* para evitar pantalla en blanco ---
         m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True, tiles=None)
-        BASEMAPS[base_choice].add_to(m)
+
+        def _safe_add_base(layer_name: str):
+            """Intenta agregar el base layer elegido; si falla, agrega OSM estándar."""
+            try:
+                BASEMAPS[layer_name].add_to(m)
+                return layer_name
+            except Exception:
+                pass
+            # Fallback 1: OSM estándar (URL directa)
+            try:
+                folium.TileLayer(
+                    tiles="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                    name="OpenStreetMap (fallback)",
+                    attr="© OpenStreetMap contributors"
+                ).add_to(m)
+                return "OpenStreetMap (fallback)"
+            except Exception:
+                pass
+            # Fallback 2: Esri Street
+            try:
+                folium.TileLayer(
+                    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+                    name="Esri Street (fallback)",
+                    attr="Sources: Esri, USGS, NOAA, etc."
+                ).add_to(m)
+                return "Esri Street (fallback)"
+            except Exception:
+                return None
+
+        used_base = _safe_add_base(base_choice)
+        if not used_base:
+            st.error("No fue posible cargar ningún mapa base. Revisa tu conexión de red.")
+        else:
+            st.caption(f"Base usada: **{used_base}**")
 
         # --- Marcadores ---
         points = dff.dropna(subset=["lat", "lon"]) if not dff.empty else pd.DataFrame(columns=["lat", "lon"])
@@ -440,15 +472,10 @@ with tab_map:
             )
             marker = folium.CircleMarker(
                 location=(float(r["lat"]), float(r["lon"])),
-                radius=8,
-                color=color,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.8,
+                radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
                 tooltip=r.get("titulo", "Caso"),
                 popup=folium.Popup(popup_html, max_width=350),
             )
-            # 👇 Nada "suelto" que deje objetos en pantalla
             if use_cluster:
                 marker.add_to(cluster)
             else:
@@ -476,7 +503,6 @@ with tab_map:
                     resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
                     resp.raise_for_status()
                     return resp.json()
-
                 candidates = [geojson_url]
                 if "github.com/" in geojson_url:
                     candidates.append(
@@ -486,7 +512,6 @@ with tab_map:
                         owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
                         branch_path = geojson_url.split("/blob/")[1]
                         candidates.append(f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}")
-
                 for u in candidates:
                     try:
                         gj_obj = _fetch(u)
@@ -504,11 +529,9 @@ with tab_map:
             if area_key:
                 # Provincia vs Cantón
                 if area_key.lower().startswith(("nom_cant", "canton")):
-                    area_df = dff.copy()
-                    area_df["area"] = area_df["canton"].fillna("")
+                    area_df = dff.copy(); area_df["area"] = area_df["canton"].fillna("")
                 else:
-                    area_df = dff.copy()
-                    area_df["area"] = area_df["provincia"].fillna("")
+                    area_df = dff.copy(); area_df["area"] = area_df["provincia"].fillna("")
 
                 # Métrica
                 if color_metric.startswith("impacto"):
@@ -533,11 +556,9 @@ with tab_map:
 
                 # Pintado por valor (coropleta)
                 from branca.colormap import linear
-
                 if len(map_df):
                     vmin, vmax = float(map_df["valor"].min()), float(map_df["valor"].max())
-                    if vmin == vmax:
-                        vmin, vmax = (0.0, vmin or 1.0)
+                    if vmin == vmax: vmin, vmax = (0.0, vmin or 1.0)
                     cmap = linear.YlOrRd_09.scale(vmin, vmax)
 
                     def choropleth_style(feature):
@@ -555,6 +576,7 @@ with tab_map:
 
         folium.LayerControl(collapsed=False).add_to(m)
         st_folium(m, use_container_width=True, height=650)
+
 
 # ================================================================
 # Parte 5: Gráficas (Altair) y Exportar (CSV/Excel)
@@ -647,6 +669,7 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
 
