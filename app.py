@@ -2,6 +2,8 @@
 # ================================================================
 # Casos de Éxito – Mapa y Análisis (Streamlit + Google Sheets)
 # Funciona SOLO con [gcp_service_account] en secrets (no usa [gsheets])
+# - Compatibilidad con Streamlit nuevo/antiguo: RERUN()
+# - Basemaps con attribution (evita ValueError)
 # ================================================================
 
 import uuid, json, io, re, os
@@ -21,6 +23,9 @@ import requests  # para GeoJSON por URL
 
 # ------------------ Config básica ------------------
 st.set_page_config(page_title="Casos de Éxito CR", page_icon="🗺️", layout="wide")
+
+# ✅ Compat layer para rerun (Streamlit >=1.30 usa st.rerun)
+RERUN = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
 
 # ✅ SIN sección [gsheets]: valores configurables aquí o por variables de entorno
 SHEET_ID = os.getenv("SHEET_ID", "1jLq0TeCc6x2OXnWC2I_A4f1kwg5Zgfd665v5Bm9IYSw")
@@ -96,8 +101,7 @@ def _open_or_create_worksheet(gc):
     headers_now = [h.strip().lower() for h in ws.row_values(1)]
     if headers_now != [h.lower() for h in HEADERS]:
         ws.resize(rows=max(2, ws.row_count), cols=len(HEADERS))
-        # como son 17 columnas, Q=chr(64+17)=Q
-        ws.update("A1:Q1", [HEADERS])
+        ws.update("A1:Q1", [HEADERS])  # 17 columnas -> Q
     return ws
 
 def _read_df(ws) -> pd.DataFrame:
@@ -134,7 +138,7 @@ def _update_row_by_id(ws, _id: str, new_record: dict):
     idx = _find_row_index_by_id(ws, _id)
     if not idx:
         return False
-    ws.update("A{0}:Q{0}".format(idx), [[new_record.get(h, "") for h in HEADERS]])
+    ws.update(f"A{idx}:Q{idx}", [[new_record.get(h, "") for h in HEADERS]])
     return True
 
 def _delete_row_by_id(ws, _id: str):
@@ -274,7 +278,7 @@ with tab_reg:
                 }
                 _append_row(ws, rec)
                 st.success("Caso guardado correctamente ✅")
-                st.experimental_rerun()
+                if RERUN: RERUN()
 
     st.divider()
     st.subheader("Administrar registros")
@@ -318,14 +322,14 @@ with tab_reg:
                     ok = _update_row_by_id(ws, rec["id"], rec)
                     if ok:
                         st.success("Actualizado ✅")
-                        st.experimental_rerun()
+                        if RERUN: RERUN()
                     else:
                         st.error("No se encontró el registro para actualizar.")
             with ecols[1]:
                 if st.button("🗑️ Eliminar", use_container_width=True):
                     if _delete_row_by_id(ws, rec["id"]):
                         st.warning("Registro eliminado.")
-                        st.experimental_rerun()
+                        if RERUN: RERUN()
                     else:
                         st.error("No se pudo eliminar.")
             with ecols[2]:
@@ -343,7 +347,7 @@ with tab_map:
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-        # Pre-cargado sugerido: provincias CR (puedes pegarlo aquí)
+        # Pre-cargado sugerido: provincias CR
         default_geojson = "https://raw.githubusercontent.com/juanmamoralesp/cr-geojson/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
@@ -379,9 +383,6 @@ with tab_map:
             (marker.add_to(cluster) if use_cluster else marker.add_to(m))
 
         # Heatmap
-        def _weight_from_impacto(i):  # sombra local para evitar problemas si cambias arriba
-            return {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}.get(str(i), 0.5)
-
         if show_heat and not points.empty:
             heat_data = [[row["lat"], row["lon"], _weight_from_impacto(row["impacto"])] for _, row in points.iterrows()]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
