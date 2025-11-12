@@ -191,10 +191,18 @@ def _delete_row_by_id(ws, _id: str) -> bool:
     ws.delete_rows(idx)
     return True
 
+# --- AL FINAL DE LA PARTE 1, luego de definir _get_gs_client_or_none() ---
+# Alias de compatibilidad por si alguna parte llama al nombre antiguo:
+_get_gs_client = _get_gs_client_or_none
+
+
 
 # ================================================================
-# Parte 2 (fragmento corregido): Filtros laterales seguros
+# Parte 2: UI lateral, helpers, conexión y filtros robustos
 # ================================================================
+
+import re
+from datetime import date
 
 def options_or_default(df: pd.DataFrame, col: str, default: list[str]) -> list[str]:
     """Devuelve lista de opciones seguras para un multiselect."""
@@ -204,22 +212,30 @@ def options_or_default(df: pd.DataFrame, col: str, default: list[str]) -> list[s
     vals = [v for v in vals if str(v).strip()]
     return sorted(vals) or list(default)
 
+# --- Helpers de color (si no existen) ---
+if "_color_for_category" not in globals():
+    def _color_for_category(cat: str, palette: dict) -> str:
+        """Devuelve un color estable para la categoría; usa la paleta si existe."""
+        if isinstance(palette, dict) and cat in palette and palette[cat]:
+            return palette[cat]
+        h = abs(hash(str(cat))) % 360
+        return f"hsl({h},70%,45%)"
+
 # ----- Sidebar: configuración y paleta -----
 with st.sidebar:
     st.header("⚙️ Configuración")
     st.caption("Fuente: Google Sheets")
     st.write(f"Worksheet: `{WS_NAME}`")
-    st.subheader("🎨 Paleta por categoría")
 
+    st.subheader("🎨 Paleta por categoría")
     if "palette" not in st.session_state:
         st.session_state.palette = {c: "#1f77b4" for c in DEFAULT_CATEGORIAS}
-
     for c in DEFAULT_CATEGORIAS:
         st.session_state.palette[c] = st.color_picker(
             c, st.session_state.palette.get(c, "#1f77b4"), key=f"palette_{c}"
         )
 
-# ----- Conexión y carga de datos -----
+# ----- Conexión y carga de datos (una vez) -----
 gc = _get_gs_client_or_none()
 ws = _open_or_create_worksheet(gc)
 df = _read_df(ws)
@@ -228,17 +244,16 @@ df = _read_df(ws)
 st.sidebar.subheader("🔎 Filtros")
 min_date = date(2020, 1, 1)
 max_date = date.today()
-
-if not df["fecha_evento"].dropna().empty:
+if "fecha_evento" in df.columns and not df["fecha_evento"].dropna().empty:
     min_date = min(min_date, df["fecha_evento"].dropna().min())
     max_date = max(max_date, df["fecha_evento"].dropna().max())
 
 rango_fecha = st.sidebar.date_input("Rango de fechas", (min_date, max_date))
 f_prov   = st.sidebar.multiselect("Provincia", options_or_default(df, "provincia", []))
-f_canton = st.sidebar.multiselect("Cantón", options_or_default(df, "canton", []))
+f_canton = st.sidebar.multiselect("Cantón",    options_or_default(df, "canton", []))
 f_cat    = st.sidebar.multiselect("Categoría", options_or_default(df, "categoria", DEFAULT_CATEGORIAS))
-f_imp    = st.sidebar.multiselect("Impacto", options_or_default(df, "impacto", DEFAULT_IMPACTO))
-f_estado = st.sidebar.multiselect("Estado", options_or_default(df, "estado", DEFAULT_ESTADO))
+f_imp    = st.sidebar.multiselect("Impacto",   options_or_default(df, "impacto",   DEFAULT_IMPACTO))
+f_estado = st.sidebar.multiselect("Estado",    options_or_default(df, "estado",    DEFAULT_ESTADO))
 texto    = st.sidebar.text_input("Buscar (título/descr./etiquetas)")
 
 def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
@@ -246,26 +261,23 @@ def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
     if isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
         ini, fin = rango_fecha
         dff = dff[(dff["fecha_evento"].isna()) | ((dff["fecha_evento"] >= ini) & (dff["fecha_evento"] <= fin))]
-    if f_prov:
-        dff = dff[dff["provincia"].isin(f_prov)]
-    if f_canton:
-        dff = dff[dff["canton"].isin(f_canton)]
-    if f_cat:
-        dff = dff[dff["categoria"].isin(f_cat)]
-    if f_imp:
-        dff = dff[dff["impacto"].isin(f_imp)]
-    if f_estado:
-        dff = dff[dff["estado"].isin(f_estado)]
+    if f_prov:   dff = dff[dff["provincia"].isin(f_prov)]
+    if f_canton: dff = dff[dff["canton"].isin(f_canton)]
+    if f_cat:    dff = dff[dff["categoria"].isin(f_cat)]
+    if f_imp:    dff = dff[dff["impacto"].isin(f_imp)]
+    if f_estado: dff = dff[dff["estado"].isin(f_estado)]
     if texto:
         patt = re.compile(re.escape(texto), re.IGNORECASE)
-        cols = ["titulo", "descripcion", "etiquetas"]
-        dff = dff[dff[cols].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
+        cols = [c for c in ["titulo","descripcion","etiquetas"] if c in dff.columns]
+        if cols:
+            dff = dff[dff[cols].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
     return dff
 
 # ----- Pestañas -----
 tab_reg, tab_map, tab_charts, tab_export = st.tabs(
     ["📝 Registrar / Admin", "🗺️ Mapa", "📈 Gráficas", "⬇️ Exportar"]
 )
+
 
 
 # ================================================================
@@ -400,7 +412,6 @@ with tab_map:
     with left:
         zoom = st.slider("Zoom inicial", 5, 12, 7)
 
-        # Base por defecto: CartoDB Positron
         base_keys = list(BASEMAPS.keys())
         default_base_idx = base_keys.index("CartoDB Positron") if "CartoDB Positron" in base_keys else 0
         base_choice = st.selectbox("Mapa base", base_keys, index=default_base_idx)
@@ -419,21 +430,20 @@ with tab_map:
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson", "json"])
         st.caption("Si el GeoJSON no carga, el mapa igual mostrará puntos y Heatmap.")
 
-    # Datos filtrados (provienen de Parte 2)
+    # Datos filtrados (de Parte 2)
     dff = _apply_filters(df)
 
     with right:
-        # --- Mapa base con *fallbacks* para evitar pantalla en blanco ---
+        # --- Mapa base con *fallbacks* ---
         m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True, tiles=None)
 
         def _safe_add_base(layer_name: str):
-            """Intenta agregar el base layer elegido; si falla, agrega OSM estándar."""
             try:
                 BASEMAPS[layer_name].add_to(m)
                 return layer_name
             except Exception:
                 pass
-            # Fallback 1: OSM estándar (URL directa)
+            # Fallback 1: OSM estándar
             try:
                 folium.TileLayer(
                     tiles="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -460,23 +470,29 @@ with tab_map:
         else:
             st.caption(f"Base usada: **{used_base}**")
 
-        # --- Marcadores ---
-        points = dff.dropna(subset=["lat", "lon"]) if not dff.empty else pd.DataFrame(columns=["lat", "lon"])
+        # --- Marcadores (sin objetos sueltos) ---
+        points = dff.dropna(subset=["lat","lon"]) if not dff.empty else pd.DataFrame(columns=["lat","lon"])
+
+        _palette = st.session_state.get("palette", {c: "#1f77b4" for c in DEFAULT_CATEGORIAS})
+
         if use_cluster:
             cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
 
         for _, r in points.iterrows():
-            color = _color_for_category(r.get("categoria", ""), st.session_state.palette)
+            cat_val = r.get("categoria", "")
+            color = _color_for_category(cat_val, _palette)
+
             popup_html = (
                 f"<b>{r.get('titulo','Caso')}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
                 f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
                 f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
                 f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}"
             )
+
             marker = folium.CircleMarker(
                 location=(float(r["lat"]), float(r["lon"])),
                 radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
-                tooltip=r.get("titulo", "Caso"),
+                tooltip=r.get("titulo","Caso"),
                 popup=folium.Popup(popup_html, max_width=350),
             )
             if use_cluster:
@@ -493,7 +509,7 @@ with tab_map:
             ]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # --- Coropleta (GeoJSON) con reintentos y silenciosa si falla ---
+        # --- Coropleta (GeoJSON) con reintentos silenciosos ---
         gj_obj = None
         if choropleth_on:
             if geojson_file is not None:
@@ -521,40 +537,38 @@ with tab_map:
                         break
                     except Exception:
                         continue
-                # Si todo falla, no interrumpimos: solo no pintamos coropleta.
 
         # --- Pintado por áreas (si hay GeoJSON válido) ---
         if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"]) > 0:
             props = gj_obj["features"][0].get("properties", {})
-            candidate_keys = ["name", "NOM_PROV", "provincia", "PROVINCIA", "NOM_CANT", "canton", "CANTON"]
+            candidate_keys = ["name","NOM_PROV","provincia","PROVINCIA","NOM_CANT","canton","CANTON"]
             area_key = next((k for k in candidate_keys if k in props), None)
 
             if area_key:
                 # Provincia vs Cantón
-                if area_key.lower().startswith(("nom_cant", "canton")):
+                if area_key.lower().startswith(("nom_cant","canton")):
                     area_df = dff.copy(); area_df["area"] = area_df["canton"].fillna("")
                 else:
                     area_df = dff.copy(); area_df["area"] = area_df["provincia"].fillna("")
 
                 # Métrica
                 if color_metric.startswith("impacto"):
-                    mp = {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}
+                    mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
                     map_weight = area_df.groupby("area")["impacto"].apply(
-                        lambda s: float(np.mean([mp.get(str(x), 0.5) for x in s])) if len(s) else 0.0
+                        lambda s: float(np.mean([mp.get(str(x),0.5) for x in s])) if len(s) else 0.0
                     )
                 else:
                     map_weight = area_df.groupby("area")["id"].count()
 
-                map_df = map_weight.reset_index().rename(columns={0: "valor", "id": "valor"})
+                map_df = map_weight.reset_index().rename(columns={0:"valor","id":"valor"})
                 map_df["area_norm"] = map_df["area"].str.strip().str.lower()
 
                 # Capa de referencia + tooltip
                 folium.GeoJson(
-                    gj_obj,
-                    name="Áreas (referencia)",
-                    style_function=lambda x: {"fillColor": "#eeeeee", "color": "#555", "weight": 1, "fillOpacity": 0.6},
-                    highlight_function=lambda x: {"weight": 2, "color": "#222"},
-                    tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"]),
+                    gj_obj, name="Áreas (referencia)",
+                    style_function=lambda x: {"fillColor":"#eeeeee","color":"#555","weight":1,"fillOpacity":0.6},
+                    highlight_function=lambda x: {"weight":2,"color":"#222"},
+                    tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"])
                 ).add_to(m)
 
                 # Pintado por valor (coropleta)
@@ -565,13 +579,13 @@ with tab_map:
                     cmap = linear.YlOrRd_09.scale(vmin, vmax)
 
                     def choropleth_style(feature):
-                        name_val = str(feature["properties"].get(area_key, "")).strip().lower()
+                        name_val = str(feature["properties"].get(area_key,"")).strip().lower()
                         row = map_df[map_df["area_norm"] == name_val]
                         if not row.empty:
                             val = float(row["valor"].values[0])
-                            return {"fillColor": cmap(val), "color": "#444", "weight": 1, "fillOpacity": 0.7}
+                            return {"fillColor": cmap(val), "color":"#444", "weight":1, "fillOpacity":0.7}
                         else:
-                            return {"fillColor": "#dddddd", "color": "#444", "weight": 1, "fillOpacity": 0.3}
+                            return {"fillColor": "#dddddd", "color":"#444", "weight":1, "fillOpacity":0.3}
 
                     folium.GeoJson(gj_obj, name="Coropleta (auto)", style_function=choropleth_style).add_to(m)
                     cmap.caption = "Intensidad por área"
@@ -579,7 +593,6 @@ with tab_map:
 
         folium.LayerControl(collapsed=False).add_to(m)
         st_folium(m, use_container_width=True, height=650)
-
 
 # ================================================================
 # Parte 5: Gráficas (Altair) y Exportar (CSV/Excel)
@@ -672,6 +685,7 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
 
