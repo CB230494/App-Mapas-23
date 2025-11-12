@@ -193,22 +193,16 @@ def _delete_row_by_id(ws, _id: str) -> bool:
 
 
 # ================================================================
-# Parte 2: Utilidades de UI, paletas, filtros, carga inicial y tabs
+# Parte 2 (fragmento corregido): Filtros laterales seguros
 # ================================================================
 
-def _color_for_category(cat: str, palette: dict) -> str:
-    """Color estable por categoría con override desde paleta del sidebar."""
-    if cat in palette and palette[cat]:
-        return palette[cat]
-    h = abs(hash(str(cat))) % 360
-    return f"hsl({h},70%,45%)"
-
-def _weight_from_impacto(imp: str) -> float:
-    return {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}.get(str(imp), 0.5)
-
-def _month_floor(d: date):
-    if pd.isna(d): return None
-    return date(d.year, d.month, 1)
+def options_or_default(df: pd.DataFrame, col: str, default: list[str]) -> list[str]:
+    """Devuelve lista de opciones seguras para un multiselect."""
+    if col not in df.columns:
+        return list(default)
+    vals = df[col].dropna().unique().tolist()
+    vals = [v for v in vals if str(v).strip()]
+    return sorted(vals) or list(default)
 
 # ----- Sidebar: configuración y paleta -----
 with st.sidebar:
@@ -216,47 +210,55 @@ with st.sidebar:
     st.caption("Fuente: Google Sheets")
     st.write(f"Worksheet: `{WS_NAME}`")
     st.subheader("🎨 Paleta por categoría")
+
     if "palette" not in st.session_state:
         st.session_state.palette = {c: "#1f77b4" for c in DEFAULT_CATEGORIAS}
+
     for c in DEFAULT_CATEGORIAS:
         st.session_state.palette[c] = st.color_picker(
             c, st.session_state.palette.get(c, "#1f77b4"), key=f"palette_{c}"
         )
 
-# ----- Conexión y carga de datos (una sola vez) -----
-gc = _get_gs_client_or_none()          # <- nombre nuevo
+# ----- Conexión y carga de datos -----
+gc = _get_gs_client_or_none()
 ws = _open_or_create_worksheet(gc)
 df = _read_df(ws)
 
-# ----- Filtros globales -----
+# ----- Filtros -----
 st.sidebar.subheader("🔎 Filtros")
 min_date = date(2020, 1, 1)
 max_date = date.today()
+
 if not df["fecha_evento"].dropna().empty:
     min_date = min(min_date, df["fecha_evento"].dropna().min())
     max_date = max(max_date, df["fecha_evento"].dropna().max())
 
 rango_fecha = st.sidebar.date_input("Rango de fechas", (min_date, max_date))
-f_prov   = st.sidebar.multiselect("Provincia", sorted(df["provincia"].dropna().unique()))
-f_canton = st.sidebar.multiselect("Cantón", sorted(df["canton"].dropna().unique()))
-f_cat    = st.sidebar.multiselect("Categoría", sorted(df["categoria"].dropna().unique() or DEFAULT_CATEGORIAS))
-f_imp    = st.sidebar.multiselect("Impacto", DEFAULT_IMPACTO)
-f_estado = st.sidebar.multiselect("Estado",  DEFAULT_ESTADO or ["Activo"])
+f_prov   = st.sidebar.multiselect("Provincia", options_or_default(df, "provincia", []))
+f_canton = st.sidebar.multiselect("Cantón", options_or_default(df, "canton", []))
+f_cat    = st.sidebar.multiselect("Categoría", options_or_default(df, "categoria", DEFAULT_CATEGORIAS))
+f_imp    = st.sidebar.multiselect("Impacto", options_or_default(df, "impacto", DEFAULT_IMPACTO))
+f_estado = st.sidebar.multiselect("Estado", options_or_default(df, "estado", DEFAULT_ESTADO))
 texto    = st.sidebar.text_input("Buscar (título/descr./etiquetas)")
 
 def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
     dff = df0.copy()
-    if isinstance(rango_fecha, tuple) and len(rango_fecha)==2:
+    if isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
         ini, fin = rango_fecha
-        dff = dff[(dff["fecha_evento"].isna()) | ((dff["fecha_evento"]>=ini) & (dff["fecha_evento"]<=fin))]
-    if f_prov:   dff = dff[dff["provincia"].isin(f_prov)]
-    if f_canton: dff = dff[dff["canton"].isin(f_canton)]
-    if f_cat:    dff = dff[dff["categoria"].isin(f_cat)]
-    if f_imp:    dff = dff[dff["impacto"].isin(f_imp)]
-    if f_estado: dff = dff[dff["estado"].isin(f_estado)]
+        dff = dff[(dff["fecha_evento"].isna()) | ((dff["fecha_evento"] >= ini) & (dff["fecha_evento"] <= fin))]
+    if f_prov:
+        dff = dff[dff["provincia"].isin(f_prov)]
+    if f_canton:
+        dff = dff[dff["canton"].isin(f_canton)]
+    if f_cat:
+        dff = dff[dff["categoria"].isin(f_cat)]
+    if f_imp:
+        dff = dff[dff["impacto"].isin(f_imp)]
+    if f_estado:
+        dff = dff[dff["estado"].isin(f_estado)]
     if texto:
         patt = re.compile(re.escape(texto), re.IGNORECASE)
-        cols = ["titulo","descripcion","etiquetas"]
+        cols = ["titulo", "descripcion", "etiquetas"]
         dff = dff[dff[cols].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
     return dff
 
@@ -264,6 +266,7 @@ def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
 tab_reg, tab_map, tab_charts, tab_export = st.tabs(
     ["📝 Registrar / Admin", "🗺️ Mapa", "📈 Gráficas", "⬇️ Exportar"]
 )
+
 
 # ================================================================
 # Parte 3: Registrar / Administrar registros (CRUD)
@@ -669,6 +672,7 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
 
