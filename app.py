@@ -2,7 +2,6 @@
 # ================================================================
 # CASOS DE ÉXITO CR – Streamlit + Google Sheets + Folium + Altair
 # Autor: (tu equipo)
-# Estructura en 5 partes para fácil mantenimiento
 # ------------------------------------------------
 # Parte 1: Configuración, imports, constantes, conexión GSheets
 # ================================================================
@@ -20,7 +19,7 @@ import folium
 from folium.plugins import HeatMap, MarkerCluster
 from streamlit_folium import st_folium
 import altair as alt
-import requests  # carga GeoJSON por URL (con User-Agent)
+import requests  # carga GeoJSON por URL (con User-Agent + reintentos)
 
 # ---------- Config básica ----------
 st.set_page_config(page_title="Casos de Éxito – Costa Rica",
@@ -46,9 +45,18 @@ DEFAULT_IMPACTO    = ["Alto","Medio","Bajo"]
 DEFAULT_ESTADO     = ["Activo","Archivado"]
 CR_CENTER = (9.748917, -83.753428)  # Centro aproximado de Costa Rica
 
-# Basemaps con attribution (evita ValueError: Custom tiles must have an attribution)
+# ---------- Mapas base (12 opciones) con attribution correcto ----------
 BASEMAPS = {
-    "OpenStreetMap": folium.TileLayer(tiles="OpenStreetMap", control=True, name="OpenStreetMap"),
+    # OpenStreetMap
+    "OpenStreetMap": folium.TileLayer(
+        tiles="OpenStreetMap", name="OpenStreetMap", control=True
+    ),
+    "OSM France": folium.TileLayer(
+        tiles="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+        name="OSM France", control=True,
+        attr="© OpenStreetMap France, © OSM contributors"
+    ),
+    # Carto
     "CartoDB Positron": folium.TileLayer(
         tiles="CartoDB positron", name="CartoDB Positron", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
@@ -57,15 +65,46 @@ BASEMAPS = {
         tiles="CartoDB dark_matter", name="CartoDB Dark Matter", control=True,
         attr="© OpenStreetMap contributors, © CARTO"
     ),
+    # Stamen
+    "Stamen Toner Lite": folium.TileLayer(
+        tiles="https://stamen-tiles.a.ssl.fastly.net/toner-lite/{z}/{x}/{y}.png",
+        name="Stamen Toner Lite", control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
+    ),
     "Stamen Terrain": folium.TileLayer(
         tiles="Stamen Terrain", name="Stamen Terrain", control=True,
         attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
     ),
+    "Stamen Watercolor": folium.TileLayer(
+        tiles="Stamen Watercolor", name="Stamen Watercolor", control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
+    ),
+    # Esri
+    "Esri WorldStreetMap": folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        name="Esri Street", control=True,
+        attr="Sources: Esri, USGS, NOAA, etc."
+    ),
+    "Esri WorldTopoMap": folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        name="Esri Topo", control=True,
+        attr="Sources: Esri, USGS, NOAA, etc."
+    ),
     "Esri WorldImagery": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        name="ESRI Satélite", control=True,
-        attr=("Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, "
-              "IGN, IGP, UPR-EGP, and the GIS User Community")
+        name="Esri Satélite", control=True,
+        attr="Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, etc."
+    ),
+    # Otros
+    "OpenTopoMap": folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        name="OpenTopoMap", control=True,
+        attr="© OpenTopoMap (CC-BY-SA), © OSM contributors"
+    ),
+    "HikeBike": folium.TileLayer(
+        tiles="https://tiles.wmflabs.org/hikebike/{z}/{x}/{y}.png",
+        name="HikeBike", control=True,
+        attr="© Hike & Bike Map, © OSM contributors"
     ),
 }
 
@@ -135,6 +174,7 @@ def _delete_row_by_id(ws, _id: str) -> bool:
     if not idx: return False
     ws.delete_rows(idx)
     return True
+
 # ================================================================
 # Parte 2: Utilidades de UI, paletas, filtros y carga inicial
 # ================================================================
@@ -343,60 +383,89 @@ with tab_map:
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-        # URL sugerida con CDN que permite peticiones desde Streamlit Cloud
+
+        # 📌 CDN recomendado (sirve en Streamlit Cloud)
         default_geojson = "https://rawcdn.githack.com/juanmamoralesp/cr-geojson/refs/heads/main/provincias.geojson"
         geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
-        geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
+
+        # ✅ Coropleta ACTIVADA por defecto (colorea sin que el usuario haga nada)
         choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
-        color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"])
-        st.caption("Si no cargas/subes un GeoJSON válido, la coropleta no se mostrará.")
+
+        # Métrica por defecto: conteo de casos por área
+        color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"], index=0)
+
+        # Uploader opcional
+        geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
+        st.caption("Si no cargas/subes un GeoJSON válido, el mapa mostrará puntos y Heatmap de todas formas.")
 
     dff = _apply_filters(df)
+
     with right:
+        # --- Mapa base ---
         m = folium.Map(location=CR_CENTER, zoom_start=zoom, control_scale=True)
         BASEMAPS[base_choice].add_to(m)
 
-        # ---- Marcadores ----
+        # --- Marcadores ---
         points = dff.dropna(subset=["lat","lon"])
         if use_cluster:
             cluster = MarkerCluster(name="Casos (cluster)").add_to(m)
         for _, r in points.iterrows():
             color = _color_for_category(r["categoria"], st.session_state.palette)
-            popup = folium.Popup(
-                html=(
-                    f"<b>{r['titulo']}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
-                    f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
-                    f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
-                    f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}"
-                ),
-                max_width=350
+            popup_html = (
+                f"<b>{r['titulo']}</b><br>{(r.get('descripcion','') or '')[:300]}<br>"
+                f"<i>{r.get('categoria','')} • {r.get('impacto','')} • {r.get('fecha_evento','')}</i><br>"
+                f"{r.get('provincia','')} / {r.get('canton','')} / {r.get('distrito','')}<br>"
+                f"{'📎 <a href=\"'+str(r.get('evidencia_url'))+'\" target=\"_blank\">Evidencia</a>' if r.get('evidencia_url') else ''}"
             )
             marker = folium.CircleMarker(
                 location=(r["lat"], r["lon"]),
                 radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.8,
-                tooltip=r["titulo"]
+                tooltip=r["titulo"], popup=folium.Popup(popup_html, max_width=350)
             )
-            marker.add_child(popup)
-            (marker.add_to(cluster) if use_cluster else marker.add_to(m))
+            if use_cluster:
+                marker.add_to(cluster)
+            else:
+                marker.add_to(m)
 
-        # ---- Heatmap ----
+        # --- Heatmap ---
         if show_heat and not points.empty:
             heat_data = [[row["lat"], row["lon"], _weight_from_impacto(row["impacto"])] for _, row in points.iterrows()]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
 
-        # ---- Coropleta (GeoJSON) ----
+        # --- Coropleta (GeoJSON) con encabezados y reintentos ---
         gj_obj = None
-        if geojson_file is not None:
-            gj_obj = json.load(geojson_file)
-        elif geojson_url.strip():
-            try:
-                # ⚠️ Importante: encabezado User-Agent para evitar bloqueos (GitHub/CF)
-                resp = requests.get(geojson_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                resp.raise_for_status()
-                gj_obj = resp.json()
-            except Exception:
-                st.warning("No se pudo cargar el GeoJSON desde la URL.")
+        if choropleth_on:
+            if geojson_file is not None:
+                # Subido por el usuario
+                gj_obj = json.load(geojson_file)
+            elif geojson_url.strip():
+                # Intentos escalonados con User-Agent para evitar bloqueos
+                def _fetch(url):
+                    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+                    resp.raise_for_status()
+                    return resp.json()
 
+                tried_urls = []
+                try:
+                    gj_obj = _fetch(geojson_url); tried_urls.append(geojson_url)
+                except Exception:
+                    # Variante raw.githubusercontent.com
+                    try:
+                        if "github.com/" in geojson_url:
+                            raw = geojson_url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
+                            gj_obj = _fetch(raw); tried_urls.append(raw)
+                    except Exception:
+                        # Variante usando el repo/branch si venía con /blob/
+                        try:
+                            if "github.com/" in geojson_url and "/blob/" in geojson_url:
+                                owner_repo_path = geojson_url.split("github.com/")[1].split("/blob/")[0]
+                                branch_path = geojson_url.split("/blob/")[1]
+                                api_url = f"https://raw.githubusercontent.com/{owner_repo_path}/{branch_path}"
+                                gj_obj = _fetch(api_url); tried_urls.append(api_url)
+                        except Exception:
+                            st.warning("No se pudo cargar el GeoJSON desde la URL.")
+
+        # --- Pintado por áreas (si se obtuvo un GeoJSON válido) ---
         if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"]) > 0:
             props = gj_obj["features"][0].get("properties", {})
             candidate_keys = ["name","NOM_PROV","provincia","PROVINCIA","NOM_CANT","canton","CANTON"]
@@ -411,7 +480,7 @@ with tab_map:
                 else:
                     area_df = dff.copy(); area_df["area"] = area_df["provincia"].fillna("")
 
-                # Métrica de color
+                # Métrica
                 if color_metric.startswith("impacto"):
                     def _impact_weight(s):
                         mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
@@ -424,15 +493,15 @@ with tab_map:
                 map_df = map_weight.reset_index().rename(columns={0:"valor","id":"valor"})
                 map_df["area_norm"] = map_df["area"].str.strip().str.lower()
 
-                # Capa base + tooltip
+                # Capa de referencia + tooltip
                 folium.GeoJson(
-                    gj_obj, name="Áreas",
+                    gj_obj, name="Áreas (referencia)",
                     style_function=lambda x: {"fillColor":"#eeeeee","color":"#555","weight":1,"fillOpacity":0.6},
                     highlight_function=lambda x: {"weight":2,"color":"#222"},
                     tooltip=folium.GeoJsonTooltip(fields=[area_key], aliases=["Área"])
                 ).add_to(m)
 
-                # Pintado por valor
+                # Pintado por valor (coropleta)
                 from branca.colormap import linear
                 if len(map_df):
                     vmin, vmax = float(map_df["valor"].min()), float(map_df["valor"].max())
@@ -448,12 +517,13 @@ with tab_map:
                         else:
                             return {"fillColor": "#dddddd", "color":"#444", "weight":1, "fillOpacity":0.3}
 
-                    folium.GeoJson(gj_obj, name="Coropleta", style_function=choropleth_style).add_to(m)
+                    folium.GeoJson(gj_obj, name="Coropleta (auto)", style_function=choropleth_style).add_to(m)
                     cmap.caption = "Intensidad por área"
                     cmap.add_to(m)
 
         folium.LayerControl(collapsed=False).add_to(m)
         st_folium(m, use_container_width=True, height=650)
+
 # ================================================================
 # Parte 5: Gráficas (Altair) y Exportar (CSV/Excel)
 # ================================================================
@@ -545,3 +615,4 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
