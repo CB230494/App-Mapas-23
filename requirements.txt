@@ -9,6 +9,9 @@ branca
 altair
 python-dateutil
 xlsxwriter
+requests
+
+
 
 
 
