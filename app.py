@@ -4,10 +4,8 @@
 # Funciona SOLO con [gcp_service_account] en secrets (no usa [gsheets])
 # ================================================================
 
-import uuid, json, io, math, re, os
+import uuid, json, io, re, os
 from datetime import datetime, date
-from dateutil import parser as dtparser
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -41,14 +39,32 @@ DEFAULT_ESTADO     = ["Activo","Archivado"]
 
 CR_CENTER = (9.748917, -83.753428)  # Centro aproximado de Costa Rica
 
+# ✅ Basemaps con attribution para evitar ValueError
 BASEMAPS = {
-    "OpenStreetMap": folium.TileLayer(tiles="OpenStreetMap", control=True, name="OSM"),
-    "CartoDB Positron": folium.TileLayer(tiles="CartoDB Positron", control=True, name="CartoDB Positron"),
-    "CartoDB Dark": folium.TileLayer(tiles="CartoDB Dark_Matter", control=True, name="CartoDB Dark"),
-    "Stamen Terrain": folium.TileLayer(tiles="Stamen Terrain", control=True, name="Stamen Terrain"),
+    "OpenStreetMap": folium.TileLayer(tiles="OpenStreetMap", control=True, name="OpenStreetMap"),
+    "CartoDB Positron": folium.TileLayer(
+        tiles="CartoDB positron",
+        name="CartoDB Positron",
+        control=True,
+        attr="© OpenStreetMap contributors, © CARTO"
+    ),
+    "CartoDB Dark Matter": folium.TileLayer(
+        tiles="CartoDB dark_matter",
+        name="CartoDB Dark Matter",
+        control=True,
+        attr="© OpenStreetMap contributors, © CARTO"
+    ),
+    "Stamen Terrain": folium.TileLayer(
+        tiles="Stamen Terrain",
+        name="Stamen Terrain",
+        control=True,
+        attr="Map tiles by Stamen Design (CC BY 3.0). Data © OpenStreetMap contributors"
+    ),
     "Esri WorldImagery": folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri", name="ESRI Satélite", control=True
+        attr="Sources: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+        name="ESRI Satélite",
+        control=True
     ),
 }
 
@@ -80,7 +96,8 @@ def _open_or_create_worksheet(gc):
     headers_now = [h.strip().lower() for h in ws.row_values(1)]
     if headers_now != [h.lower() for h in HEADERS]:
         ws.resize(rows=max(2, ws.row_count), cols=len(HEADERS))
-        ws.update(f"A1:{chr(64+len(HEADERS))}1", [HEADERS])
+        # como son 17 columnas, Q=chr(64+17)=Q
+        ws.update("A1:Q1", [HEADERS])
     return ws
 
 def _read_df(ws) -> pd.DataFrame:
@@ -117,7 +134,7 @@ def _update_row_by_id(ws, _id: str, new_record: dict):
     idx = _find_row_index_by_id(ws, _id)
     if not idx:
         return False
-    ws.update(f"A{idx}:{chr(64+len(HEADERS))}{idx}", [[new_record.get(h, "") for h in HEADERS]])
+    ws.update("A{0}:Q{0}".format(idx), [[new_record.get(h, "") for h in HEADERS]])
     return True
 
 def _delete_row_by_id(ws, _id: str):
@@ -133,11 +150,6 @@ def _color_for_category(cat: str, palette: dict):
         return palette[cat]
     h = abs(hash(cat)) % 360
     return f"hsl({h},70%,45%)"
-
-def _parse_etiquetas(x: str):
-    if not x:
-        return []
-    return [t.strip() for t in re.split(r"[;,]", str(x)) if t.strip()]
 
 def _weight_from_impacto(imp: str):
     return {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}.get(str(imp), 0.5)
@@ -193,7 +205,8 @@ def _apply_filters(df0: pd.DataFrame) -> pd.DataFrame:
     if f_estado: dff = dff[dff["estado"].isin(f_estado)]
     if texto:
         patt = re.compile(re.escape(texto), re.IGNORECASE)
-        dff = dff[dff[["titulo","descripcion","etiquetas"]].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
+        cols = ["titulo","descripcion","etiquetas"]
+        dff = dff[dff[cols].astype(str).apply(lambda r: any(patt.search(x) for x in r), axis=1)]
     return dff
 
 # ------------------ Tabs ------------------
@@ -330,11 +343,13 @@ with tab_map:
         show_heat = st.checkbox("Capa Heatmap", value=True)
 
         st.markdown("**Capa de áreas (GeoJSON provincias/cantones – opcional)**")
-        geojson_url = st.text_input("URL GeoJSON (opcional)", value="")
+        # Pre-cargado sugerido: provincias CR (puedes pegarlo aquí)
+        default_geojson = "https://raw.githubusercontent.com/juanmamoralesp/cr-geojson/main/provincias.geojson"
+        geojson_url = st.text_input("URL GeoJSON (opcional)", value=default_geojson)
         geojson_file = st.file_uploader("o sube un .geojson / .json", type=["geojson","json"])
-        choropleth_on = st.checkbox("Mostrar coropleta por conteo", value=False)
+        choropleth_on = st.checkbox("Mostrar coropleta por conteo/impacto", value=True)
         color_metric = st.selectbox("Métrica de color", ["conteo (por área)","impacto promedio"])
-        st.caption("Si no cargas un GeoJSON, la coropleta no se mostrará.")
+        st.caption("Si no cargas un GeoJSON válido, la coropleta no se mostrará.")
 
     dff = _apply_filters(df)
     with right:
@@ -364,6 +379,9 @@ with tab_map:
             (marker.add_to(cluster) if use_cluster else marker.add_to(m))
 
         # Heatmap
+        def _weight_from_impacto(i):  # sombra local para evitar problemas si cambias arriba
+            return {"Alto": 1.0, "Medio": 0.6, "Bajo": 0.3}.get(str(i), 0.5)
+
         if show_heat and not points.empty:
             heat_data = [[row["lat"], row["lon"], _weight_from_impacto(row["impacto"])] for _, row in points.iterrows()]
             HeatMap(heat_data, name="Heatmap", radius=20, blur=15, max_zoom=12).add_to(m)
@@ -378,8 +396,8 @@ with tab_map:
             except Exception:
                 st.warning("No se pudo cargar el GeoJSON desde la URL.")
 
-        if choropleth_on and gj_obj:
-            props = gj_obj.get("features", [{}])[0].get("properties", {})
+        if choropleth_on and gj_obj and "features" in gj_obj and len(gj_obj["features"]) > 0:
+            props = gj_obj["features"][0].get("properties", {})
             candidate_keys = ["name","NOM_PROV","provincia","PROVINCIA","NOM_CANT","canton","CANTON"]
             area_key = next((k for k in candidate_keys if k in props), None)
 
@@ -396,7 +414,11 @@ with tab_map:
 
                 # Métrica
                 if color_metric.startswith("impacto"):
-                    map_weight = area_df.groupby("area")["impacto"].apply(lambda s: np.mean([_weight_from_impacto(x) for x in s]))
+                    def _impact_weight(s):
+                        mp = {"Alto":1.0, "Medio":0.6, "Bajo":0.3}
+                        vals = [mp.get(str(x), 0.5) for x in s]
+                        return float(np.mean(vals)) if len(vals) else 0.0
+                    map_weight = area_df.groupby("area")["impacto"].apply(_impact_weight)
                 else:
                     map_weight = area_df.groupby("area")["id"].count()
 
@@ -417,6 +439,8 @@ with tab_map:
                 from branca.colormap import linear
                 if len(map_df):
                     vmin, vmax = float(map_df["valor"].min()), float(map_df["valor"].max())
+                    if vmin == vmax:
+                        vmin, vmax = (0.0, vmin or 1.0)
                     cmap = linear.YlOrRd_09.scale(vmin, vmax)
 
                     def choropleth_style(feature):
@@ -453,7 +477,7 @@ with tab_charts:
             stacked = st.checkbox("Apilado (si aplica)", value=True)
 
         cat_list = sorted(dff["categoria"].dropna().unique().tolist() or DEFAULT_CATEGORIAS)
-        cat_colors = [_color_for_category(c, st.session_state.palette) for c in cat_list]
+        cat_colors = [st.session_state.palette.get(c, "#1f77b4") for c in cat_list]
         alt.themes.enable("opaque")
         base = alt.Chart(dff)
 
