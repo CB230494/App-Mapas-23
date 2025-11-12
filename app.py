@@ -281,126 +281,124 @@ tab_reg, tab_map, tab_charts, tab_export = st.tabs(
 
 
 # ================================================================
-# Parte 3: Registrar / Administrar registros (CRUD)
+# Parte 3: Gráficas (KPIs, series por mes, categorías, impacto)
 # ================================================================
 
-with tab_reg:
-    st.subheader("Registrar nuevo caso de éxito")
+import altair as alt
 
-    cols = st.columns([1,1,1,1])
-    with cols[0]:
-        titulo = st.text_input("Título *")
-        categoria = st.selectbox("Categoría *", sorted(set(DEFAULT_CATEGORIAS + list(df["categoria"].dropna().unique()))))
-        impacto = st.selectbox("Impacto *", DEFAULT_IMPACTO, index=1)
-        fecha_evento = st.date_input("Fecha del evento *", value=date.today())
-    with cols[1]:
-        responsable = st.text_input("Responsable")
-        institucion = st.text_input("Institución")
-        provincia = st.text_input("Provincia")
-        canton = st.text_input("Cantón")
-    with cols[2]:
-        distrito = st.text_input("Distrito")
-        etiquetas = st.text_input("Etiquetas (coma/;)")
-        evidencia_url = st.text_input("URL de evidencia (foto/video/doc)")
-        estado = st.selectbox("Estado", DEFAULT_ESTADO, index=0)
-    with cols[3]:
-        st.markdown("**Ubicación (click en el mapa o escriba coord.)**")
-        lat = st.number_input("Latitud", value=float(CR_CENTER[0]), format="%.6f")
-        lon = st.number_input("Longitud", value=float(CR_CENTER[1]), format="%.6f")
+# --- Helper de mes seguro (si no existe) ---
+if "_month_floor" not in globals():
+    from datetime import datetime, date as _date
 
-    # Mini mapa para capturar coordenadas
-    st.markdown("Haga click en el mapa para tomar coordenadas:")
-    m_form = folium.Map(location=CR_CENTER, zoom_start=7)
-    folium.Marker(CR_CENTER, tooltip="Centro CR").add_to(m_form)
-    map_click = st_folium(m_form, height=300, width=None, returned_objects=["last_clicked"])
-    if map_click and map_click.get("last_clicked"):
-        lat = float(map_click["last_clicked"]["lat"])
-        lon = float(map_click["last_clicked"]["lng"])
-        st.info(f"Coordenadas seleccionadas: {lat:.6f}, {lon:.6f}")
+    def _month_floor(x):
+        """Devuelve primer día del mes (date) o NaT si no se puede parsear."""
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return pd.NaT
+        # Si ya es datetime/date
+        if isinstance(x, (datetime, _date)):
+            return _date(x.year, x.month, 1)
+        # Intentar parsear
+        dt = pd.to_datetime(x, errors="coerce")
+        if pd.isna(dt):
+            return pd.NaT
+        return _date(dt.year, dt.month, 1)
 
-    desc = st.text_area("Descripción *", height=120)
-
-    btn_cols = st.columns([1,1,3])
-    with btn_cols[0]:
-        if st.button("➕ Guardar caso", use_container_width=True, type="primary"):
-            if not titulo.strip() or not desc.strip():
-                st.error("Título y descripción son obligatorios.")
-            else:
-                rec = {
-                    "id": str(uuid.uuid4()),
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "titulo": titulo.strip(),
-                    "descripcion": desc.strip(),
-                    "categoria": categoria.strip(),
-                    "impacto": impacto.strip(),
-                    "responsable": responsable.strip(),
-                    "institucion": institucion.strip(),
-                    "fecha_evento": fecha_evento.isoformat(),
-                    "provincia": provincia.strip(),
-                    "canton": canton.strip(),
-                    "distrito": distrito.strip(),
-                    "lat": lat, "lon": lon,
-                    "etiquetas": etiquetas.strip(),
-                    "evidencia_url": evidencia_url.strip(),
-                    "estado": estado.strip()
-                }
-                _append_row(ws, rec)
-                st.success("Caso guardado correctamente ✅")
-                if RERUN: RERUN()
-
-    st.divider()
-    st.subheader("Administrar registros")
+with tab_charts:
+    st.subheader("Gráficas")
 
     dff = _apply_filters(df)
-    if dff.empty:
-        st.info("No hay registros que cumplan los filtros actuales.")
+
+    # KPIs básicos
+    total_casos = int(len(dff))
+    total_activos = int((dff["estado"] == "Activo").sum()) if "estado" in dff.columns else 0
+    total_arch = int((dff["estado"] == "Archivado").sum()) if "estado" in dff.columns else 0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total de casos", f"{total_casos}")
+    c2.metric("Activos", f"{total_activos}")
+    c3.metric("Archivados", f"{total_arch}")
+
+    # ------- Serie temporal por mes -------
+    st.markdown("### Casos por mes")
+
+    if not dff.empty and "fecha_evento" in dff.columns:
+        dff_ts = dff.copy()
+        dff_ts["mes"] = dff_ts["fecha_evento"].apply(_month_floor)
+        dff_ts = dff_ts.dropna(subset=["mes"])
+
+        if not dff_ts.empty:
+            serie = (
+                dff_ts.groupby("mes")["id"].count().reset_index()
+                .rename(columns={"id": "casos"})
+            )
+            chart = (
+                alt.Chart(serie)
+                .mark_line(point=True)
+                .encode(x=alt.X("mes:T", title="Mes"),
+                        y=alt.Y("casos:Q", title="Casos"),
+                        tooltip=["mes:T", "casos:Q"])
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("No hay fechas válidas para graficar por mes.")
     else:
-        st.dataframe(dff, height=280, use_container_width=True)
+        st.info("No hay datos de `fecha_evento` para graficar por mes.")
 
-        st.markdown("**Editar / Eliminar**")
-        selected_id = st.selectbox("Seleccione el ID a editar", [""] + dff["id"].tolist())
-        if selected_id:
-            rec = dff[dff["id"]==selected_id].iloc[0].to_dict()
-            et1, et2 = st.columns([1,1])
-            with et1:
-                cats = sorted(set(DEFAULT_CATEGORIAS + list(df["categoria"].dropna().unique())))
-                new_titulo = st.text_input("Título", rec.get("titulo",""))
-                new_categoria = st.selectbox("Categoría", cats, index=(cats.index(rec.get("categoria")) if rec.get("categoria") in cats else 0))
-                new_impacto = st.selectbox("Impacto", DEFAULT_IMPACTO, index=(DEFAULT_IMPACTO.index(rec.get("impacto")) if rec.get("impacto") in DEFAULT_IMPACTO else 1))
-                new_fecha = st.date_input("Fecha", rec.get("fecha_evento") or date.today())
-            with et2:
-                new_estado = st.selectbox("Estado", DEFAULT_ESTADO, index=(DEFAULT_ESTADO.index(rec.get("estado")) if rec.get("estado") in DEFAULT_ESTADO else 0))
-                new_lat = st.number_input("Lat", value=float(rec["lat"]) if not pd.isna(rec["lat"]) else CR_CENTER[0], format="%.6f")
-                new_lon = st.number_input("Lon", value=float(rec["lon"]) if not pd.isna(rec["lon"]) else CR_CENTER[1], format="%.6f")
+    # ------- Barras por categoría -------
+    st.markdown("### Casos por categoría")
+    if not dff.empty and "categoria" in dff.columns:
+        cat = (
+            dff.copy()
+            .assign(categoria=lambda x: x["categoria"].fillna("Sin categoría"))
+            .groupby("categoria")["id"].count().reset_index()
+            .rename(columns={"id": "casos"})
+            .sort_values("casos", ascending=False)
+        )
+        if not cat.empty:
+            bars = (
+                alt.Chart(cat)
+                .mark_bar()
+                .encode(x=alt.X("casos:Q", title="Casos"),
+                        y=alt.Y("categoria:N", sort="-x", title="Categoría"),
+                        tooltip=["categoria:N","casos:Q"])
+                .properties(height=max(200, 24*len(cat)))
+            )
+            st.altair_chart(bars, use_container_width=True)
+        else:
+            st.info("No hay categorías para mostrar.")
+    else:
+        st.info("No hay datos de `categoria` para graficar.")
 
-            new_desc = st.text_area("Descripción", rec.get("descripcion",""), height=120)
+    # ------- Impacto (Alto/Medio/Bajo) -------
+    st.markdown("### Distribución por impacto")
+    if not dff.empty and "impacto" in dff.columns:
+        imp = (
+            dff.copy()
+            .assign(impacto=lambda x: x["impacto"].fillna("Sin dato"))
+            .groupby("impacto")["id"].count().reset_index()
+            .rename(columns={"id": "casos"})
+        )
+        if not imp.empty:
+            pie = (
+                alt.Chart(imp)
+                .mark_arc()
+                .encode(theta="casos:Q", color=alt.Color("impacto:N", legend=None),
+                        tooltip=["impacto:N","casos:Q"])
+                .properties(height=300)
+            )
+            legend = (
+                alt.Chart(imp)
+                .mark_rect()
+                .encode(y=alt.Y("impacto:N", axis=alt.Axis(title="Impacto")),
+                        color=alt.Color("impacto:N", legend=None))
+            )
+            st.altair_chart(pie | legend, use_container_width=True)
+        else:
+            st.info("No hay datos de impacto para mostrar.")
+    else:
+        st.info("No hay datos de `impacto` para graficar.")
 
-            ecols = st.columns(3)
-            with ecols[0]:
-                if st.button("💾 Guardar cambios", use_container_width=True):
-                    rec.update({
-                        "titulo": new_titulo,
-                        "categoria": new_categoria,
-                        "impacto": new_impacto,
-                        "fecha_evento": new_fecha.isoformat(),
-                        "estado": new_estado,
-                        "lat": new_lat, "lon": new_lon,
-                        "descripcion": new_desc
-                    })
-                    if _update_row_by_id(ws, rec["id"], rec):
-                        st.success("Actualizado ✅")
-                        if RERUN: RERUN()
-                    else:
-                        st.error("No se encontró el registro para actualizar.")
-            with ecols[1]:
-                if st.button("🗑️ Eliminar", use_container_width=True):
-                    if _delete_row_by_id(ws, rec["id"]):
-                        st.warning("Registro eliminado.")
-                        if RERUN: RERUN()
-                    else:
-                        st.error("No se pudo eliminar.")
-            with ecols[2]:
-                st.caption("Edite lo necesario y luego guarde.")
 # ================================================================
 # Parte 4: Mapa Folium – cluster, heatmap y coropleta (GeoJSON)
 # ================================================================
@@ -685,6 +683,7 @@ with tab_export:
                            use_container_width=True)
 
 st.caption("© Casos de Éxito – Costa Rica")
+
 
 
 
